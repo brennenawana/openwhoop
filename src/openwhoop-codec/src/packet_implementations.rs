@@ -108,6 +108,15 @@ impl WhoopPacket {
         )
     }
 
+    pub fn run_alarm() -> WhoopPacket {
+        WhoopPacket::new(
+            PacketType::Command,
+            0,
+            CommandNumber::RunAlarm.as_u8(),
+            vec![0x00],
+        )
+    }
+
     pub fn get_battery_level() -> WhoopPacket {
         WhoopPacket::new(
             PacketType::Command,
