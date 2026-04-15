@@ -38,6 +38,14 @@ pub enum WhoopData {
         enabled: bool,
         unix: u32,
     },
+    BatteryLevel {
+        /// Battery percentage 0.0–100.0 (one decimal of precision).
+        percent: f32,
+    },
+    HelloHarvard {
+        charging: bool,
+        is_worn: bool,
+    },
 }
 
 impl WhoopData {
@@ -57,6 +65,12 @@ impl WhoopData {
                     }
                     CommandNumber::GetAlarmTime => {
                         Self::parse_alarm_time_response(packet.data)
+                    }
+                    CommandNumber::GetBatteryLevel => {
+                        Self::parse_battery_level_response(packet.data)
+                    }
+                    CommandNumber::GetHelloHarvard => {
+                        Self::parse_hello_harvard_response(packet.data)
                     }
                     _ => Err(WhoopError::Unimplemented),
                 }
@@ -384,6 +398,27 @@ impl WhoopData {
         let enabled = enabled_byte != 0;
         let unix = data.read_u32_le()?;
         Ok(Self::AlarmInfo { enabled, unix })
+    }
+
+    /// Response layout (payload after framing):
+    ///   byte 0-1: unused
+    ///   byte 2-3: uint16_le raw value, where percent = raw / 10.0
+    /// Device returns one decimal of precision (e.g. 145 → 14.5%).
+    fn parse_battery_level_response(mut data: Vec<u8>) -> Result<Self, WhoopError> {
+        let _ = data.read::<2>()?;
+        let raw = data.read_u16_le()?;
+        Ok(Self::BatteryLevel {
+            percent: f32::from(raw) / 10.0,
+        })
+    }
+
+    /// GetHelloHarvard response is a large status struct; we pull only
+    /// the two fields the UI needs. Offsets reverse-engineered from the
+    /// whoomp browser client.
+    fn parse_hello_harvard_response(data: Vec<u8>) -> Result<Self, WhoopError> {
+        let charging = *data.get(7).ok_or(WhoopError::PacketTooShort)? != 0;
+        let is_worn = *data.get(116).ok_or(WhoopError::PacketTooShort)? != 0;
+        Ok(Self::HelloHarvard { charging, is_worn })
     }
 }
 

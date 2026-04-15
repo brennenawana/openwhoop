@@ -192,4 +192,68 @@ impl WhoopDevice {
             Err(_) => Err(anyhow!("timed out waiting for alarm notification")),
         }
     }
+
+    pub async fn get_battery(&mut self) -> anyhow::Result<f32> {
+        self.subscribe(CMD_FROM_STRAP).await?;
+        let mut notifications = self.peripheral.notifications().await?;
+        self.send_command(WhoopPacket::get_battery_level()).await?;
+
+        // The notification stream can contain stale command responses from
+        // initialize() (hello_harvard, get_name, etc). Skip anything that
+        // isn't the battery response we just asked for.
+        let fut = async {
+            while let Some(notif) = notifications.next().await {
+                if notif.uuid != CMD_FROM_STRAP {
+                    continue;
+                }
+                let Ok(packet) = WhoopPacket::from_data(notif.value) else {
+                    continue;
+                };
+                let Ok(data) = WhoopData::from_packet(packet) else {
+                    continue;
+                };
+                if let WhoopData::BatteryLevel { percent } = data {
+                    return Some(percent);
+                }
+            }
+            None
+        };
+
+        match timeout(Duration::from_secs(10), fut).await {
+            Ok(Some(percent)) => Ok(percent),
+            Ok(None) => Err(anyhow!("notification stream ended before battery response")),
+            Err(_) => Err(anyhow!("timed out waiting for battery response")),
+        }
+    }
+
+    /// Query the device for charging + wrist-worn state via GetHelloHarvard.
+    pub async fn get_hello(&mut self) -> anyhow::Result<(bool, bool)> {
+        self.subscribe(CMD_FROM_STRAP).await?;
+        let mut notifications = self.peripheral.notifications().await?;
+        self.send_command(WhoopPacket::hello_harvard()).await?;
+
+        let fut = async {
+            while let Some(notif) = notifications.next().await {
+                if notif.uuid != CMD_FROM_STRAP {
+                    continue;
+                }
+                let Ok(packet) = WhoopPacket::from_data(notif.value) else {
+                    continue;
+                };
+                let Ok(data) = WhoopData::from_packet(packet) else {
+                    continue;
+                };
+                if let WhoopData::HelloHarvard { charging, is_worn } = data {
+                    return Some((charging, is_worn));
+                }
+            }
+            None
+        };
+
+        match timeout(Duration::from_secs(10), fut).await {
+            Ok(Some(pair)) => Ok(pair),
+            Ok(None) => Err(anyhow!("notification stream ended before hello response")),
+            Err(_) => Err(anyhow!("timed out waiting for hello response")),
+        }
+    }
 }
