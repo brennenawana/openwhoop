@@ -3,6 +3,7 @@
 pub mod prelude;
 
 pub mod activities;
+pub mod battery_log;
 pub mod heart_rate;
 pub mod packets;
 pub mod sleep_cycles;
