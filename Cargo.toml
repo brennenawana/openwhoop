@@ -32,6 +32,7 @@ futures = "0.3.31"
 indicatif = "0.17"
 log = "0.4.24"
 rand = "0.9"
+rustfft = "6.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sea-orm-migration = { version = "1.1.0", features = ["runtime-tokio-rustls", "sqlx-sqlite", "sqlx-postgres"] }
 strum = "0.26.3"

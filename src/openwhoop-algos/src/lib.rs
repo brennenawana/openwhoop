@@ -23,3 +23,5 @@ pub(crate) mod temperature;
 pub use temperature::{SkinTempCalculator, SkinTempScore};
 
 pub mod helpers;
+
+pub mod sleep_staging;
