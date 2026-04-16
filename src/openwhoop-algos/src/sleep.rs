@@ -94,7 +94,7 @@ impl SleepCycle {
         let duration = (end - start).num_seconds();
         const IDEAL_DURATION: i64 = 60 * 60 * 8;
 
-        let score = (duration / IDEAL_DURATION) as f64;
+        let score = duration as f64 / IDEAL_DURATION as f64;
 
         (score * 100.0).clamp(0.0, 100.0)
     }
@@ -119,10 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn sleep_score_4h_is_0() {
-        // 4h / 8h = 0.5 -> integer division = 0 -> score = 0
+    fn sleep_score_4h_is_50() {
         let score = SleepCycle::sleep_score(dt(22, 0), dt(22, 0) + TimeDelta::hours(4));
-        assert_eq!(score, 0.0);
+        assert_eq!(score, 50.0);
     }
 
     #[test]
