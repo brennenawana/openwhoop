@@ -170,6 +170,7 @@ impl DatabaseHandler {
             avg_hrv: Set(sleep.avg_hrv.into()),
             score: Set(sleep.score.into()),
             synced: NotSet,
+            ..Default::default()
         };
 
         let _r = sleep_cycles::Entity::insert(model)
