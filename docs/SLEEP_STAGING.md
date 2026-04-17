@@ -236,6 +236,34 @@ For now, accept rule-v2 as the right semantics for the foreseeable future. Don't
 
 Forward-compat note: rule-v2's per-night HR normalization aligns the on-device feature distribution with what MESA's bzhai pipeline produces (pooled `StandardScaler` per training subject) — Phase 2 LightGBM training fits to the same family of features.
 
+#### Wake fall-through over-fires on restless Light (open follow-up)
+
+Investigated 2026-04-18 against cycle 2 of the live tray DB (04-17 night, 4h54m). Distribution: Light 65.7%, Wake 15.4%, REM 9.3%, Unknown 8.1%, Deep 1.4%. The 15% Wake fraction is well above the 5% population norm.
+
+Attribution of the 91 Wake epochs:
+- **0 / 91** triggered Rule 1 (the explicit `motion > MOTION_WAKE_THRESHOLD && hr_mean > resting + 15` gate).
+- **91 / 91** were Rule 5 fall-throughs (`stillness <= LIGHT_MOTION_STILLNESS = 0.7`).
+- 84 / 91 sit in a single 35-min cluster (01:50-02:25). HR for those epochs ranged 60-67 — within the night's normal sleep HR range (53.1-82.6, mean 64.2). Stillness in the cluster: 0.55-0.79.
+
+The cluster looks like a real period of restless sleep (slowly climbing HR, frequent micro-movements) consistent with the user's reported sleeping conditions (hard exercise mat, thin blanket). But labeling 35 minutes of stillness=0.6 / HR=64 as Wake — without HR-elevation confirmation — is over-aggressive. WHOOP and other consumer wearables would likely score this as Light + WASO.
+
+Root cause: Rule 5 has no HR confirmation. A single threshold on stillness collapses "restless Light" and "true wake" into one bucket.
+
+Proposed fix (deferred, not shipping without ground-truth labels): split the fall-through into two bands.
+
+```
+Rule 4a: stillness > 0.7                                        → Light
+Rule 4b: 0.5 < stillness <= 0.7 AND hr_mean < within-night p75  → Light  (restless sleep)
+Rule 5a: 0.5 < stillness <= 0.7 AND hr_mean >= within-night p75 → Wake   (HR-confirmed arousal)
+Rule 5b: stillness <= 0.5                                       → Wake   (gross movement)
+```
+
+Requires adding `hr_p75` to `NightThresholds`. The `LIGHT_MOTION_STILLNESS = 0.7` threshold becomes the upper boundary of an ambiguous band rather than a hard wake cutoff.
+
+Why deferred: same reason as the Deep next-iteration directions — without a second source of truth (an actigraphy-validated dataset or another wearable's labeling on the same night), tuning is shooting in the dark. Two nights of data is not enough to know whether the 15% wake fraction is a classifier bug or a real reflection of poor sleep on that surface. Holding the change until either (a) more nights accumulate or (b) Phase 2 ML lands.
+
+Recorded as dev_note in the live tray DB for follow-up.
+
 Post-processing in order:
 
 1. **Forbidden transitions** — Wake→Deep rewritten to Light (Deep needs NREM descent).
