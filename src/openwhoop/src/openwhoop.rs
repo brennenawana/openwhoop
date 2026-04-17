@@ -9,8 +9,9 @@ use openwhoop_codec::{
 
 use crate::{
     algo::{
-        ActivityPeriod, MAX_SLEEP_PAUSE, SkinTempCalculator, SleepCycle, SpO2Calculator,
-        StressCalculator, helpers::format_hm::FormatHM,
+        ActivityPeriod, MAX_SLEEP_PAUSE, MAX_WORKOUT_DURATION, MIN_WORKOUT_DURATION,
+        SkinTempCalculator, SleepCycle, SpO2Calculator, StressCalculator,
+        helpers::format_hm::FormatHM,
     },
     types::activities,
 };
@@ -270,6 +271,28 @@ impl OpenWhoop {
                     _ => continue,
                 };
 
+                let duration = event.end - event.start;
+
+                // The gravity classifier returns `Active` for any
+                // non-still period. A whole waking day between two
+                // sleep cycles can collapse into one 18h "Active"
+                // run — which surfaces in the UI as an 18h workout.
+                // Filter out runs outside the plausible workout band.
+                if matches!(activity, activities::ActivityType::Activity)
+                    && (duration < MIN_WORKOUT_DURATION
+                        || duration > MAX_WORKOUT_DURATION)
+                {
+                    debug!(
+                        "Skipping out-of-range Active period {} → {} ({}): outside [{}, {}]",
+                        event.start,
+                        event.end,
+                        duration.format_hm(),
+                        MIN_WORKOUT_DURATION.format_hm(),
+                        MAX_WORKOUT_DURATION.format_hm(),
+                    );
+                    continue;
+                }
+
                 let activity = activities::ActivityPeriod {
                     period_id: cycle_id,
                     from: event.start,
@@ -277,7 +300,6 @@ impl OpenWhoop {
                     activity,
                 };
 
-                let duration = activity.to - activity.from;
                 info!(
                     "Detected activity period from: {} to: {}, duration: {}",
                     activity.from,

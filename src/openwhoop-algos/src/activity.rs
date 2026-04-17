@@ -5,6 +5,18 @@ const ACTIVITY_CHANGE_THRESHOLD: Duration = Duration::minutes(15);
 const MIN_SLEEP_DURATION: Duration = Duration::minutes(60);
 pub const MAX_SLEEP_PAUSE: Duration = Duration::minutes(60);
 
+/// Shortest run we're willing to label as a workout.
+/// Anything shorter is almost certainly a transient movement blip.
+pub const MIN_WORKOUT_DURATION: Duration = Duration::minutes(10);
+
+/// Longest run we're willing to label as a single workout.
+/// The gravity-based classifier returns "Active" for any non-still
+/// period, so a whole waking day (~18h between sleeps) can collapse
+/// into one Active run. Cap at 4h — no honest single-bout workout
+/// runs longer than that, and the whole-day false positive (which
+/// produced an 18h 31m "workout" in prod) is filtered out.
+pub const MAX_WORKOUT_DURATION: Duration = Duration::hours(4);
+
 // Gravity-based detection thresholds (from notebook analysis)
 const GRAVITY_STILL_THRESHOLD: f32 = 0.01; // g - max delta to be considered "still"
 const GRAVITY_WINDOW_MINUTES: i64 = 15; // rolling window size in minutes
