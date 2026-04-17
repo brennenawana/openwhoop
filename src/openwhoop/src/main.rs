@@ -450,6 +450,7 @@ impl OpenWhoopCli {
                 let whoop = OpenWhoop::new(db_handler);
                 whoop.detect_sleeps().await?;
                 whoop.detect_events().await?;
+                whoop.stage_sleep().await?;
             }
             OpenWhoopCommand::SleepStats => {
                 let whoop = OpenWhoop::new(db_handler);

@@ -13,6 +13,8 @@ pub use openwhoop::OpenWhoop;
 
 pub mod api;
 
+pub mod sleep_staging;
+
 pub mod algo {
     pub use openwhoop_algos::*;
 }

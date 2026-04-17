@@ -274,6 +274,23 @@ impl OpenWhoop {
         Ok(())
     }
 
+    /// Run the sleep-staging pipeline for every cycle that hasn't yet
+    /// been classified (or whose classifier_version is "failed"). Also
+    /// refreshes the user baseline if stale (>24 h since last write).
+    /// Errors in a single cycle do not halt the pipeline — they mark
+    /// the offending cycle as failed and the run continues.
+    pub async fn stage_sleep(&self) -> anyhow::Result<()> {
+        let result = crate::sleep_staging::stage_unclassified(&self.database).await?;
+        info!(
+            "sleep staging: considered={} succeeded={} failed={} baseline_refreshed={}",
+            result.cycles_considered,
+            result.cycles_succeeded,
+            result.cycles_failed,
+            result.baseline_refreshed
+        );
+        Ok(())
+    }
+
     pub async fn calculate_spo2(&self) -> anyhow::Result<()> {
         loop {
             let last = self.database.last_spo2_time().await?;
