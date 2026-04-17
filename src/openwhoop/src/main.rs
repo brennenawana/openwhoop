@@ -164,6 +164,19 @@ pub enum OpenWhoopCommand {
         #[arg(long, default_value = "./firmware")]
         output_dir: String,
     },
+    ///
+    /// Wipe and re-run sleep staging for every cycle whose start falls
+    /// in [--from, --to]. --to defaults to today. Essential for
+    /// iterating on classifier thresholds.
+    ///
+    ReclassifySleep {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "rule-v1")]
+        classifier: String,
+    },
 }
 
 #[tokio::main]
@@ -373,6 +386,17 @@ pub fn sanitize_name(name: &str) -> String {
         .to_string()
 }
 
+fn parse_date_arg(s: &str) -> anyhow::Result<NaiveDateTime> {
+    // Accept YYYY-MM-DD (whole-day) or a full NaiveDateTime string.
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(d.and_hms_opt(0, 0, 0).unwrap());
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Ok(dt);
+    }
+    anyhow::bail!("invalid date '{s}'; use YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
+}
+
 impl OpenWhoopCli {
     async fn run(self) -> anyhow::Result<()> {
         if let OpenWhoopCommand::DownloadFirmware {
@@ -385,6 +409,32 @@ impl OpenWhoopCli {
         } = &self.subcommand
         {
             return download_firmware(email, password, device_name, maxim, nordic, output_dir).await;
+        }
+
+        if let OpenWhoopCommand::ReclassifySleep {
+            from,
+            to,
+            classifier,
+        } = &self.subcommand
+        {
+            if classifier != "rule-v1" {
+                anyhow::bail!(
+                    "unknown classifier '{classifier}'; only 'rule-v1' is supported in phase 1"
+                );
+            }
+            let from_dt = parse_date_arg(from)?;
+            let to_dt = match to {
+                Some(s) => parse_date_arg(s)?,
+                None => chrono::Local::now().date_naive().and_hms_opt(23, 59, 59).unwrap(),
+            };
+            let db_handler = DatabaseHandler::new(self.database_url).await;
+            let result =
+                openwhoop::sleep_staging::reclassify_range(&db_handler, from_dt, to_dt).await?;
+            println!(
+                "reclassify-sleep: considered={} succeeded={} failed={} classifier={}",
+                result.cycles_considered, result.cycles_succeeded, result.cycles_failed, classifier
+            );
+            return Ok(());
         }
 
         let adapter = self.create_ble_adapter().await?;
@@ -628,6 +678,9 @@ impl OpenWhoopCli {
             }
             OpenWhoopCommand::DownloadFirmware { .. } => {
                 unreachable!("handled before BLE/DB init")
+            }
+            OpenWhoopCommand::ReclassifySleep { .. } => {
+                unreachable!("handled before BLE init")
             }
         }
 
