@@ -212,12 +212,12 @@ fn dominant_freq(samples: &[f64], fs: f64, low: f64, high: f64) -> f64 {
     let df = fs / n as f64;
     let mut best_bin = 0usize;
     let mut best_mag = 0.0;
-    for i in 1..(n / 2 + 1) {
+    for (i, bin) in buf.iter().enumerate().take(n / 2 + 1).skip(1) {
         let f = i as f64 * df;
         if !(low..high).contains(&f) {
             continue;
         }
-        let mag2 = buf[i].re * buf[i].re + buf[i].im * buf[i].im;
+        let mag2 = bin.re * bin.re + bin.im * bin.im;
         if mag2 > best_mag {
             best_mag = mag2;
             best_bin = i;

@@ -571,6 +571,23 @@ impl OpenWhoop {
     }
 }
 
+fn map_sleep_cycle(sleep: openwhoop_entities::sleep_cycles::Model) -> SleepCycle {
+    SleepCycle {
+        id: sleep.end.date(),
+        start: sleep.start,
+        end: sleep.end,
+        min_bpm: sleep.min_bpm.try_into().unwrap(),
+        max_bpm: sleep.max_bpm.try_into().unwrap(),
+        avg_bpm: sleep.avg_bpm.try_into().unwrap(),
+        min_hrv: sleep.min_hrv.try_into().unwrap(),
+        max_hrv: sleep.max_hrv.try_into().unwrap(),
+        avg_hrv: sleep.avg_hrv.try_into().unwrap(),
+        score: sleep
+            .score
+            .unwrap_or_else(|| SleepCycle::sleep_score(sleep.start, sleep.end)),
+    }
+}
+
 #[cfg(test)]
 mod event_name_tests {
     use super::event_name;
@@ -594,22 +611,5 @@ mod event_name_tests {
     fn unknown_event_id_returns_unknown_marker() {
         assert_eq!(event_name(255), "Unknown");
         assert_eq!(event_name(200), "Unknown");
-    }
-}
-
-fn map_sleep_cycle(sleep: openwhoop_entities::sleep_cycles::Model) -> SleepCycle {
-    SleepCycle {
-        id: sleep.end.date(),
-        start: sleep.start,
-        end: sleep.end,
-        min_bpm: sleep.min_bpm.try_into().unwrap(),
-        max_bpm: sleep.max_bpm.try_into().unwrap(),
-        avg_bpm: sleep.avg_bpm.try_into().unwrap(),
-        min_hrv: sleep.min_hrv.try_into().unwrap(),
-        max_hrv: sleep.max_hrv.try_into().unwrap(),
-        avg_hrv: sleep.avg_hrv.try_into().unwrap(),
-        score: sleep
-            .score
-            .unwrap_or_else(|| SleepCycle::sleep_score(sleep.start, sleep.end)),
     }
 }

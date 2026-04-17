@@ -11,7 +11,9 @@
 //! DB reads live in `openwhoop-db`. Pipeline integration bolts this on
 //! to the sync loop.
 
-use chrono::{NaiveDateTime, TimeDelta};
+use chrono::NaiveDateTime;
+#[cfg(test)]
+use chrono::TimeDelta;
 
 /// Minimum duration for a wear period to count. Short blips
 /// (<5 min) are usually artifacts — "picked up + put down" — per
@@ -21,11 +23,6 @@ pub const MIN_WEAR_PERIOD_MINUTES: f64 = 5.0;
 /// Maximum gap between contiguous `skin_contact = 1` samples that
 /// still counts as one period (we merge across it). PRD §4-4.
 pub const SKIN_CONTACT_MERGE_GAP_SECS: i64 = 60;
-
-/// Minimum events-derived-gap in which we fall back to skin_contact.
-/// Below this, we trust the events source and don't second-guess with
-/// the fallback.
-pub const EVENTS_GAP_FALLBACK_THRESHOLD_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WearSource {

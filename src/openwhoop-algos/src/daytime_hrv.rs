@@ -184,7 +184,7 @@ fn clean_rr_with_ectopic_ratio(rr: &[u16]) -> (Vec<f64>, f64) {
     let phys: Vec<f64> = rr
         .iter()
         .copied()
-        .filter(|&v| v >= RR_MIN_MS && v <= RR_MAX_MS)
+        .filter(|&v| (RR_MIN_MS..=RR_MAX_MS).contains(&v))
         .map(f64::from)
         .collect();
     if phys.is_empty() {
