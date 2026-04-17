@@ -313,6 +313,22 @@ impl DatabaseHandler {
         Ok(out)
     }
 
+    /// Most-recent sleep cycle along with its epoch rows. Used by the
+    /// Tauri tray app to build a snapshot of last night's sleep.
+    pub async fn get_latest_sleep_with_epochs(
+        &self,
+    ) -> anyhow::Result<Option<(sleep_cycles::Model, Vec<sleep_epochs::Model>)>> {
+        let cycle = sleep_cycles::Entity::find()
+            .order_by_desc(sleep_cycles::Column::End)
+            .one(&self.db)
+            .await?;
+        let Some(cycle) = cycle else {
+            return Ok(None);
+        };
+        let epochs = self.get_sleep_epochs_for_cycle(cycle.id).await?;
+        Ok(Some((cycle, epochs)))
+    }
+
     /// Total nap minutes across activities in the prior 24 hours
     /// before `reference`. Used by sleep-need calculation.
     pub async fn sum_nap_minutes_in_prior_day(
