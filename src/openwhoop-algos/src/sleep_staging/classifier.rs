@@ -23,7 +23,7 @@ use super::constants::{
     DEEP_HR_OFFSET_BPM, DEEP_HR_PERCENTILE, DEEP_MOTION_STILLNESS, HR_STD_PERCENTILE,
     LF_HF_PERCENTILE, LIGHT_MOTION_STILLNESS, MOTION_WAKE_THRESHOLD, POPULATION_RESTING_HR,
     POPULATION_SLEEP_RMSSD_MEDIAN, REL_NIGHT_DEEP_MAX, REL_NIGHT_REM_MIN, REM_MOTION_STILLNESS,
-    SPECTRAL_HF_PERCENTILE, WAKE_HR_OFFSET_BPM,
+    RMSSD_DEEP_PERCENTILE, SPECTRAL_HF_PERCENTILE, WAKE_HR_OFFSET_BPM,
 };
 use super::features::EpochFeatures;
 
@@ -128,6 +128,11 @@ struct NightThresholds {
     /// night has too few valid HR values to compute a percentile —
     /// caller falls back to the legacy absolute rule.
     hr_p25: Option<f64>,
+    /// Deep RMSSD gate threshold (rule-v2): an epoch's `rmssd` must
+    /// be above this value. Same fallback pattern as `hr_p25` —
+    /// `None` means the caller falls back to the legacy
+    /// `rmssd > baseline.sleep_rmssd_median` rule.
+    rmssd_p50: Option<f64>,
 }
 
 impl NightThresholds {
@@ -148,12 +153,17 @@ impl NightThresholds {
             .iter()
             .filter_map(|f| if f.is_valid { f.hr_mean } else { None })
             .collect();
+        let rmssd: Vec<f64> = features
+            .iter()
+            .filter_map(|f| if f.is_valid { f.rmssd } else { None })
+            .collect();
 
         Self {
             hf_p75: percentile(&hf, SPECTRAL_HF_PERCENTILE),
             lfhf_p75: percentile(&lfhf, LF_HF_PERCENTILE),
             hr_std_p60: percentile(&hr_std, HR_STD_PERCENTILE),
             hr_p25: percentile(&hr_mean, DEEP_HR_PERCENTILE),
+            rmssd_p50: percentile(&rmssd, RMSSD_DEEP_PERCENTILE),
         }
     }
 }
@@ -233,11 +243,24 @@ fn classify_one(
         Some(p25) => hr_mean < p25,
         None => hr_mean < resting_hr + DEEP_HR_OFFSET_BPM,
     };
+    // RMSSD gate (rule-v2): within-night median rather than the
+    // rolling-baseline median. For users whose RMSSD distribution
+    // sits below the population baseline (47 ms), the old
+    // `rmssd > baseline.sleep_rmssd_median` rule starved Deep even
+    // when within-night parasympathetic elevation was obvious.
+    // Same literature motivation as the HR p25 gate above —
+    // per-night normalization rather than cross-night anchor.
+    // Falls back to the baseline rule when the night has no valid
+    // RMSSD values.
+    let rmssd_ok = match th.rmssd_p50 {
+        Some(p50) => rmssd > p50,
+        None => rmssd > rmssd_median,
+    };
     if let Some(hf_p75) = th.hf_p75
         && stillness > DEEP_MOTION_STILLNESS
         && hr_ok
         && hf > hf_p75
-        && rmssd > rmssd_median
+        && rmssd_ok
         && f.relative_night_position < REL_NIGHT_DEEP_MAX
     {
         return SleepStage::Deep;
