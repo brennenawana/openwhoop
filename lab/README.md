@@ -39,12 +39,20 @@ In this resolution order:
 
 1. `$OPENWHOOP_DB` env var (absolute path to a SQLite file)
 2. `$DATABASE_URL` if it starts with `sqlite://`
-3. `./db.sqlite` (repo root — where the CLI defaults)
-4. The tray's live DB at `~/Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite`
+3. The tray's live DB at `~/Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite` — **this is the default**, since the tray daemon is what actually writes sync data
+4. `./db.sqlite` (repo root — stale fallback, used by the CLI when no other DB is wired up)
 
 The connection is **read-only** (opened with `?mode=ro`) so the
 dashboard can never mutate data. Writes happen via the CLI
 (`openwhoop note "title"`) or the Rust pipeline.
+
+> **Note:** the default `openwhoop note ...` invocation (using the
+> repo's `.env`) writes to `./db.sqlite`, not the tray DB. To log
+> notes against the live tray DB that the dashboard reads, use the
+> `make note` helper which sets `DATABASE_URL` for you:
+> ```sh
+> make note ARGS='"Title" --kind status --feature dev_dashboard --body "..."'
+> ```
 
 ## What it shows
 

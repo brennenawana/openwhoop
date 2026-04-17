@@ -286,23 +286,33 @@ impl OpenWhoop {
             let history = self.database.search_history(options).await?;
             let events = ActivityPeriod::detect_from_gravity(&history);
 
+            // NOTE: `detect_from_gravity` is a sleep/wake detector —
+            // it labels any non-still run as `Active`. That's not a
+            // workout. Previously we wrote every `Active` run as an
+            // `ActivityType::Activity` row, which the tray surfaces
+            // as "Workouts" — so a whole waking day between two
+            // sleep cycles became one 18h "workout" (false positive).
+            //
+            // Workouts are now derived from `activity_samples` via
+            // the rule-v0 classifier (`classify_activities`); this
+            // pass only records **Nap** events (short still runs
+            // during the waking day — a legitimate signal from the
+            // gravity detector).
             for event in events {
-                let activity = match event.activity {
-                    Activity::Active => activities::ActivityType::Activity,
-                    Activity::Sleep => activities::ActivityType::Nap,
-                    _ => continue,
-                };
+                if !matches!(event.activity, Activity::Sleep) {
+                    continue;
+                }
 
+                let duration = event.end - event.start;
                 let activity = activities::ActivityPeriod {
                     period_id: cycle_id,
                     from: event.start,
                     to: event.end,
-                    activity,
+                    activity: activities::ActivityType::Nap,
                 };
 
-                let duration = activity.to - activity.from;
                 info!(
-                    "Detected activity period from: {} to: {}, duration: {}",
+                    "Detected nap from: {} to: {}, duration: {}",
                     activity.from,
                     activity.to,
                     duration.format_hm()

@@ -1,5 +1,7 @@
 pub(crate) mod activity;
-pub use activity::{ActivityPeriod, MAX_SLEEP_PAUSE};
+pub use activity::{
+    ActivityPeriod, MAX_SLEEP_PAUSE, MAX_WORKOUT_DURATION, MIN_WORKOUT_DURATION,
+};
 
 pub(crate) mod sleep;
 pub use sleep::SleepCycle;
