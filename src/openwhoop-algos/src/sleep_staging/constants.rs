@@ -93,3 +93,84 @@ pub const STILLNESS_DELTA_G: f32 = 0.01;
 /// 2000 standard used throughout the HRV literature.
 pub const SAMPEN_M: usize = 2;
 pub const SAMPEN_R_FRAC: f64 = 0.2;
+
+// ---------- classifier (rule-v1) thresholds ----------
+//
+// Each threshold here is either derived from a cited paper or is a
+// conservative empirical choice. Tune with reclassify-sleep after
+// observing the distribution on real user data.
+
+/// Activity-count threshold above which an epoch is considered
+/// "movement." Calibrated empirically to match WHOOP-scale activity
+/// counts on wrist. Any sum-of-|accel - 1g| over 30 s exceeding this
+/// is too high to be quiet sleep. Kept here (not in the classifier)
+/// because it's dimensional and conceptually a staging constant.
+pub const MOTION_WAKE_THRESHOLD: f64 = 20.0;
+
+/// HR elevation (BPM above resting) required alongside motion to
+/// classify Wake. Wulterkens 2021 uses a similar +15 BPM floor.
+pub const WAKE_HR_OFFSET_BPM: f64 = 15.0;
+
+/// HR ceiling (BPM above resting) for Deep classification. Deep sleep
+/// HR is typically within 5 BPM of resting because of metabolic
+/// quiescence (Trinder et al. 2012 "Autonomic activity during human
+/// sleep as a function of time and sleep stage").
+pub const DEEP_HR_OFFSET_BPM: f64 = 5.0;
+
+/// Minimum stillness ratio for Deep. Deep sleep is the stillest stage
+/// — gravity-vector barely moves across 30 s.
+pub const DEEP_MOTION_STILLNESS: f64 = 0.95;
+
+/// Respiratory-rate variability cap for Deep. Breathing is regular in
+/// Deep; Pinheiro 2016 reports resp-rate CV < 5% typical.
+pub const DEEP_RESP_RATE_STD_CAP: f64 = 2.0;
+
+/// Minimum stillness ratio for REM. REM has occasional twitches so
+/// it's slightly less still than Deep.
+pub const REM_MOTION_STILLNESS: f64 = 0.85;
+
+/// Respiratory-rate variability floor for REM. Breathing is
+/// characteristically irregular in REM due to cortical drive
+/// overriding the brainstem pattern generator.
+pub const REM_RESP_RATE_STD_MIN: f64 = 3.0;
+
+/// Relative-night-position threshold below which REM is suppressed.
+/// REM is back-loaded; classifying REM in the first 30% of the night
+/// is physiologically unlikely (most REM occurs in the second half).
+pub const REL_NIGHT_REM_MIN: f64 = 0.3;
+
+/// Minimum stillness ratio for Light sleep. Below this, the epoch is
+/// treated as Wake regardless of HRV features.
+pub const LIGHT_MOTION_STILLNESS: f64 = 0.7;
+
+// Within-night percentile thresholds (relative, self-normalizing).
+// Values chosen to match published algorithms that bucket epochs into
+// "high" / "low" feature bins.
+
+/// HF-power percentile above which Deep is considered. 75th splits
+/// "high HF" (parasympathetic dominance) from typical sleep HF.
+pub const SPECTRAL_HF_PERCENTILE: f64 = 0.75;
+
+/// LF/HF percentile above which REM is considered. Sympathovagal
+/// imbalance with LF dominance is a REM signature.
+pub const LF_HF_PERCENTILE: f64 = 0.75;
+
+/// HR-std percentile above which REM is considered. REM carries more
+/// HR variability than Light, though less than Wake. 60th is a
+/// deliberately permissive cut — REM competes with Light in the
+/// rule hierarchy and we want to not under-count it.
+pub const HR_STD_PERCENTILE: f64 = 0.60;
+
+// ---------- population fallback defaults ----------
+//
+// Used only when the per-user baseline has fewer than 14 nights of
+// data. Replace with the user's own median once the baseline matures.
+
+/// Population median resting HR (BPM). Rough midpoint of published
+/// adult wake HR distributions (Quer et al. 2020 Nature: ~61 BPM
+/// median across 92k wearable users).
+pub const POPULATION_RESTING_HR: f64 = 62.0;
+
+/// Population median sleep RMSSD (ms). Shaffer & Ginsberg 2017
+/// normative data: adult sleep RMSSD median ~40 ms.
+pub const POPULATION_SLEEP_RMSSD_MEDIAN: f64 = 40.0;
