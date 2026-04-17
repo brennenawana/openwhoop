@@ -46,6 +46,11 @@ pub struct SleepSnapshot {
     pub sleep_debt_hours: Option<f64>,
     pub score_components: Option<ScoreComponentsBreakdown>,
     pub classifier_version: Option<String>,
+    /// How many nights the user's per-user baseline has been averaged
+    /// over. `None` when no baseline row exists yet (first-ever run).
+    /// The UI can show a "calibrating" hint when this is below 14
+    /// (the full baseline window).
+    pub baseline_window_nights: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
@@ -83,7 +88,15 @@ pub async fn latest_sleep_snapshot(
     let Some((cycle, epochs)) = db.get_latest_sleep_with_epochs().await? else {
         return Ok(None);
     };
-    Ok(Some(build_snapshot(&cycle, &epochs)))
+    let baseline_window_nights = db
+        .get_latest_user_baseline()
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.window_nights);
+    let mut snap = build_snapshot(&cycle, &epochs);
+    snap.baseline_window_nights = baseline_window_nights;
+    Ok(Some(snap))
 }
 
 fn build_snapshot(
@@ -137,6 +150,7 @@ fn build_snapshot(
         sleep_debt_hours: cycle.sleep_debt_hours,
         score_components,
         classifier_version: cycle.classifier_version.clone(),
+        baseline_window_nights: None,
     }
 }
 
