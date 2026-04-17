@@ -161,10 +161,20 @@ standard and the frequency error at HRV scales is negligible.
 ### 5.6 Respiratory rate
 
 From RR-interval modulation (respiratory sinus arrhythmia). 2-minute
-window centered on the epoch, bandpass 0.1–0.5 Hz (6–30 bpm), FFT
-peak. `resp_rate_std` comes from splitting the window into thirds and
-taking the stdev of per-sub-window peaks. Suppressed when
-`hr_mean > 100` (RSA amplitude collapses at high HR, Pinheiro 2016).
+window centered on the epoch, bandpass **0.15–0.40 Hz (9–24 bpm)**,
+FFT peak. Suppressed when `hr_mean > 100` (RSA amplitude collapses
+at high HR, Pinheiro 2016).
+
+The band matches the HF HRV band and deliberately excludes the
+LF/Mayer-wave region below 0.15 Hz — the initial 0.1–0.5 Hz range
+produced spurious ~8 bpm resp-rate estimates driven by LF
+contamination rather than real breathing.
+
+`resp_rate_std` is still computed (3 × 40-s sub-window peak stdev)
+and stored in `EpochFeatures`, but is **not consumed by the
+classifier rules** — the 40-second sub-windows have ±1.5 bpm
+frequency-bin jitter alone, making the original 2/3 gate thresholds
+unusable in practice.
 
 ### 5.7 Temporal context
 
@@ -183,10 +193,22 @@ individual absolute-scale variance.
 Rule order (first match wins):
 
 1. **Wake** — high motion + HR > resting+15 BPM
-2. **Deep** — very still (>0.95) + HR < resting+5 + HF > P75 + RMSSD > user sleep median + regular breathing + first half of night
-3. **REM** — still (>0.85) + LF/HF > P75 + HR std > P60 + irregular breathing + second 70% of night
+2. **Deep** — very still (>0.95) + HR < resting+8 + HF > P50 + RMSSD > user sleep median + relative-night-position < 0.6
+3. **REM** — still (>0.85) + LF/HF > P50 + HR std > P50 + relative-night-position > 0.2
 4. **Light** — any remaining "sleep-ish" epoch with stillness > 0.7
 5. **Wake** — everything else
+
+### Calibration history
+
+Initial thresholds (from the PRD) were stricter: Deep gated on P75 HF, first-half-of-night, HR < resting+5, and respiratory regularity (resp_rate_std < 2.0); REM gated on P75 LF/HF, P60 HR std, rel_night > 0.3, and resp_rate_std > 3.0. On real user data:
+
+- **`hr_mean < resting + 5`** was near-tautological: the nightly-minimum HR used as the "resting" proxy is itself a Deep-epoch value, so requiring other epochs to be within 5 BPM excluded most candidates. Relaxed to +8.
+- **`resp_rate_std` gates** relied on a feature with ±1.5 bpm bin-quantization jitter (3 × 40-s sub-windows). Removed from both rules entirely.
+- **P75 percentile cuts** combined multiplicatively with other gates to produce near-empty intersections on short/feature-homogeneous nights. Relaxed to P50 for all three within-night percentiles.
+- **`is_first_half` / `rel_night > 0.3`** strict boundaries miss Deep in early-second-half and REM in first-30% — both occur in real nights. Relaxed to `< 0.6` / `> 0.2`.
+- **Respiratory band** changed from 0.1–0.5 Hz to 0.15–0.4 Hz (see §5.6).
+
+After these changes, stage distribution on the reference test night (5h 34m) lands within PRD §6 population ranges: Light 65.8%, Deep 21.3%, REM 11.0%, Awake 1.9%, with Deep 70% front-loaded and REM 90% back-loaded.
 
 Post-processing in order:
 

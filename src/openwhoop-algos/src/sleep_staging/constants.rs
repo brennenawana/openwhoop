@@ -74,11 +74,15 @@ pub const LF_HIGH_HZ: f64 = 0.15;
 pub const HF_LOW_HZ: f64 = 0.15;
 pub const HF_HIGH_HZ: f64 = 0.4;
 
-// Respiratory band (Hz) — 6 to 30 breaths per minute, which covers the
-// full physiological range from deep sleep (6-10 bpm) to waking arousal
-// (up to ~25 bpm).
-pub const RESP_LOW_HZ: f64 = 0.1;
-pub const RESP_HIGH_HZ: f64 = 0.5;
+// Respiratory band (Hz) — 9 to 24 breaths per minute. Matches the HF
+// HRV band (0.15-0.4 Hz), which is the physiological home of
+// respiratory sinus arrhythmia in adults. The PRD's original
+// 0.1-0.5 Hz range overlapped with the LF band (0.04-0.15 Hz, Mayer
+// waves / baroreflex ~0.1 Hz), producing spurious "8 bpm" respiratory
+// estimates driven by LF contamination rather than real breathing.
+// Tightened on 2026-04-17 after observing this on real user data.
+pub const RESP_LOW_HZ: f64 = 0.15;
+pub const RESP_HIGH_HZ: f64 = 0.40;
 
 /// pNN50 threshold (ms). Counts successive RR differences > 50 ms, a
 /// parasympathetic marker established by Bigger et al. 1988.
@@ -112,54 +116,71 @@ pub const MOTION_WAKE_THRESHOLD: f64 = 20.0;
 pub const WAKE_HR_OFFSET_BPM: f64 = 15.0;
 
 /// HR ceiling (BPM above resting) for Deep classification. Deep sleep
-/// HR is typically within 5 BPM of resting because of metabolic
-/// quiescence (Trinder et al. 2012 "Autonomic activity during human
-/// sleep as a function of time and sleep stage").
-pub const DEEP_HR_OFFSET_BPM: f64 = 5.0;
+/// HR is typically within ~5-10 BPM of resting due to metabolic
+/// quiescence (Trinder et al. 2012). Set to +8 after empirically
+/// observing on real data that +5 excluded most candidate Deep
+/// epochs for users with a low resting HR (the nightly-minimum proxy
+/// for resting is itself a Deep-epoch value, so requiring other
+/// Deep epochs to be within 5 BPM of it is near-tautological).
+pub const DEEP_HR_OFFSET_BPM: f64 = 8.0;
 
 /// Minimum stillness ratio for Deep. Deep sleep is the stillest stage
 /// — gravity-vector barely moves across 30 s.
 pub const DEEP_MOTION_STILLNESS: f64 = 0.95;
 
-/// Respiratory-rate variability cap for Deep. Breathing is regular in
-/// Deep; Pinheiro 2016 reports resp-rate CV < 5% typical.
-pub const DEEP_RESP_RATE_STD_CAP: f64 = 2.0;
-
 /// Minimum stillness ratio for REM. REM has occasional twitches so
 /// it's slightly less still than Deep.
 pub const REM_MOTION_STILLNESS: f64 = 0.85;
-
-/// Respiratory-rate variability floor for REM. Breathing is
-/// characteristically irregular in REM due to cortical drive
-/// overriding the brainstem pattern generator.
-pub const REM_RESP_RATE_STD_MIN: f64 = 3.0;
+//
+// NOTE: earlier versions gated Deep on resp_rate_std < 2.0 and REM on
+// resp_rate_std > 3.0. Both were removed after real-data observation
+// — the feature is computed from 3 × 40 s sub-window peak estimates,
+// which at 4 Hz has ~1.5 bpm bin-quantization jitter alone, making
+// the 2/3 thresholds fragile. Resp-rate-variability as a staging cue
+// is cited in the literature (REM has irregular breathing) but is a
+// secondary signal; HRV + motion are the primary discriminators.
 
 /// Relative-night-position threshold below which REM is suppressed.
-/// REM is back-loaded; classifying REM in the first 30% of the night
-/// is physiologically unlikely (most REM occurs in the second half).
-pub const REL_NIGHT_REM_MIN: f64 = 0.3;
+/// REM is back-loaded; classifying REM very early in the night is
+/// physiologically unlikely. 0.2 (not 0.3) accommodates shorter
+/// sleep windows where the absolute time is still long enough for
+/// a REM episode (a 5 h night at rel_night=0.2 is already 1 h in).
+pub const REL_NIGHT_REM_MIN: f64 = 0.2;
+
+/// Relative-night-position ceiling for Deep. Deep is front-loaded
+/// but not strictly first-half; the homeostatic drive still
+/// produces occasional Deep episodes in the early-second-half
+/// window, especially in short sleepers. Prior value was a strict
+/// `is_first_half` (0.5 cutoff).
+pub const REL_NIGHT_DEEP_MAX: f64 = 0.6;
 
 /// Minimum stillness ratio for Light sleep. Below this, the epoch is
 /// treated as Wake regardless of HRV features.
 pub const LIGHT_MOTION_STILLNESS: f64 = 0.7;
 
 // Within-night percentile thresholds (relative, self-normalizing).
-// Values chosen to match published algorithms that bucket epochs into
-// "high" / "low" feature bins.
+// Starting values were 75/75/60 for Deep/REM/REM-hr-std; relaxed to
+// 50/50/50 on 2026-04-17 after real-data tuning. Rationale: the
+// multi-gate AND structure of the Deep and REM rules compounds
+// individually-strict percentiles into near-empty intersections on
+// short or feature-homogeneous nights. A 50th-percentile cut is the
+// literature standard for "above-median high-parasympathetic / high-
+// sympathetic" bucketing (Shaffer & Ginsberg 2017, Fonseca 2023),
+// and combined with the other gates still yields selective stage
+// assignment.
 
-/// HF-power percentile above which Deep is considered. 75th splits
-/// "high HF" (parasympathetic dominance) from typical sleep HF.
-pub const SPECTRAL_HF_PERCENTILE: f64 = 0.75;
+/// HF-power percentile above which Deep is considered. Median cut
+/// captures the parasympathetic-dominant half of the night.
+pub const SPECTRAL_HF_PERCENTILE: f64 = 0.50;
 
-/// LF/HF percentile above which REM is considered. Sympathovagal
-/// imbalance with LF dominance is a REM signature.
-pub const LF_HF_PERCENTILE: f64 = 0.75;
+/// LF/HF percentile above which REM is considered. Median cut
+/// captures sympathovagal-elevated epochs relative to this night's
+/// own distribution.
+pub const LF_HF_PERCENTILE: f64 = 0.50;
 
 /// HR-std percentile above which REM is considered. REM carries more
-/// HR variability than Light, though less than Wake. 60th is a
-/// deliberately permissive cut — REM competes with Light in the
-/// rule hierarchy and we want to not under-count it.
-pub const HR_STD_PERCENTILE: f64 = 0.60;
+/// HR variability than Light, though less than Wake.
+pub const HR_STD_PERCENTILE: f64 = 0.50;
 
 // ---------- population fallback defaults ----------
 //

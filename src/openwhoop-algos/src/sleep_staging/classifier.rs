@@ -15,10 +15,10 @@
 use chrono::NaiveDateTime;
 
 use super::constants::{
-    DEEP_HR_OFFSET_BPM, DEEP_MOTION_STILLNESS, DEEP_RESP_RATE_STD_CAP, HR_STD_PERCENTILE,
-    LF_HF_PERCENTILE, LIGHT_MOTION_STILLNESS, MOTION_WAKE_THRESHOLD, POPULATION_RESTING_HR,
-    POPULATION_SLEEP_RMSSD_MEDIAN, REL_NIGHT_REM_MIN, REM_MOTION_STILLNESS,
-    REM_RESP_RATE_STD_MIN, SPECTRAL_HF_PERCENTILE, WAKE_HR_OFFSET_BPM,
+    DEEP_HR_OFFSET_BPM, DEEP_MOTION_STILLNESS, HR_STD_PERCENTILE, LF_HF_PERCENTILE,
+    LIGHT_MOTION_STILLNESS, MOTION_WAKE_THRESHOLD, POPULATION_RESTING_HR,
+    POPULATION_SLEEP_RMSSD_MEDIAN, REL_NIGHT_DEEP_MAX, REL_NIGHT_REM_MIN, REM_MOTION_STILLNESS,
+    SPECTRAL_HF_PERCENTILE, WAKE_HR_OFFSET_BPM,
 };
 use super::features::EpochFeatures;
 
@@ -192,23 +192,23 @@ fn classify_one(
 
     let hf = f.hf_power.unwrap_or(0.0);
     let rmssd = f.rmssd.unwrap_or(0.0);
-    let resp_std = f.resp_rate_std.unwrap_or(f64::INFINITY);
 
     // Rule 2: Deep / SWS.
     //
     // Physiology: slow-wave sleep is marked by parasympathetic
     // dominance (high HF power, elevated RMSSD vs. the user's own
-    // sleep median) with a metabolic HR floor near resting, very
-    // little motion, and regular breathing. Biased to the first half
-    // of the night where SWS actually lives (Carskadon & Dement,
-    // Principles and Practice of Sleep Medicine, 6e, ch. 2).
+    // sleep median) with a metabolic HR floor near resting and very
+    // little motion. Biased to the first half of the night where SWS
+    // actually lives (Carskadon & Dement, Principles and Practice of
+    // Sleep Medicine, 6e, ch. 2). Respiratory-rate regularity is a
+    // published Deep cue but `resp_rate_std` was too noisy on real
+    // data to use as a gate — see constants.rs note.
     if let Some(hf_p75) = th.hf_p75
         && stillness > DEEP_MOTION_STILLNESS
         && hr_mean < resting_hr + DEEP_HR_OFFSET_BPM
         && hf > hf_p75
         && rmssd > rmssd_median
-        && resp_std < DEEP_RESP_RATE_STD_CAP
-        && f.is_first_half
+        && f.relative_night_position < REL_NIGHT_DEEP_MAX
     {
         return SleepStage::Deep;
     }
@@ -221,14 +221,13 @@ fn classify_one(
     // Physiology: REM combines muscle atonia (stillness stays high,
     // though not as high as Deep because of occasional twitches)
     // with marked autonomic variability — elevated LF/HF ratio
-    // (sympathetic activation), higher HR variability, and irregular
-    // breathing. Back-loaded to the second half of the night.
-    // Reference: Fonseca 2023 Philips HRV+actigraphy staging.
+    // (sympathetic activation) and higher HR variability.
+    // Back-loaded to the second half of the night. Reference:
+    // Fonseca 2023 Philips HRV+actigraphy staging.
     if let (Some(lfhf_p75), Some(hr_std_p60)) = (th.lfhf_p75, th.hr_std_p60)
         && stillness > REM_MOTION_STILLNESS
         && lfhf > lfhf_p75
         && hr_std > hr_std_p60
-        && resp_std > REM_RESP_RATE_STD_MIN
         && f.relative_night_position > REL_NIGHT_REM_MIN
     {
         return SleepStage::Rem;

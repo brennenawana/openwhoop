@@ -330,6 +330,8 @@ pub async fn stage_cycles(
 
 /// Reclassify every cycle whose `start` falls in `[from, to]`. Wipes
 /// existing epochs and resets staging columns before re-running.
+/// Forces a baseline recompute after staging so subsequent runs see
+/// the effect of any threshold changes that triggered the reclassify.
 pub async fn reclassify_range(
     db: &DatabaseHandler,
     from: NaiveDateTime,
@@ -340,7 +342,9 @@ pub async fn reclassify_range(
         db.delete_sleep_epochs_for_cycle(cycle.id).await?;
         db.reset_cycle_staging_fields(cycle.id).await?;
     }
-    stage_cycles(db, &cycles).await
+    let mut result = stage_cycles(db, &cycles).await?;
+    result.baseline_refreshed = refresh_baseline(db, true).await?;
+    Ok(result)
 }
 
 async fn load_user_baseline(db: &DatabaseHandler) -> anyhow::Result<UserBaseline> {
@@ -509,9 +513,16 @@ async fn compute_prior_sleep_debt(
 /// since the last snapshot. Returns `true` when a new baseline row
 /// was written.
 pub async fn refresh_baseline_if_stale(db: &DatabaseHandler) -> anyhow::Result<bool> {
+    refresh_baseline(db, false).await
+}
+
+/// Recompute the baseline, bypassing the 24 h idempotence gate when
+/// `force = true`. Used by the reclassify path so the baseline
+/// reflects whatever threshold change motivated the reclassify.
+async fn refresh_baseline(db: &DatabaseHandler, force: bool) -> anyhow::Result<bool> {
     let now = Local::now().naive_local();
     let last = db.get_latest_user_baseline().await?.map(|m| m.computed_at);
-    if !should_update(last, now) {
+    if !force && !should_update(last, now) {
         return Ok(false);
     }
     let nights = db
