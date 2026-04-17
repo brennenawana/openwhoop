@@ -20,17 +20,57 @@ pub struct Model {
     #[sea_orm(column_type = "Double", nullable)]
     pub score: Option<f64>,
     pub synced: bool,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub awake_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub light_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub deep_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub rem_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub sleep_latency_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub waso_minutes: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub sleep_efficiency: Option<f64>,
+    pub wake_event_count: Option<i32>,
+    pub cycle_count: Option<i32>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub avg_respiratory_rate: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub min_respiratory_rate: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub max_respiratory_rate: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub skin_temp_deviation_c: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub sleep_need_hours: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub sleep_debt_hours: Option<f64>,
+    #[sea_orm(column_type = "Double", nullable)]
+    pub performance_score: Option<f64>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub classifier_version: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(has_many = "super::activities::Entity")]
     Activities,
+    #[sea_orm(has_many = "super::sleep_epochs::Entity")]
+    SleepEpochs,
 }
 
 impl Related<super::activities::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Activities.def()
+    }
+}
+
+impl Related<super::sleep_epochs::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SleepEpochs.def()
     }
 }
 

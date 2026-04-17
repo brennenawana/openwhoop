@@ -66,6 +66,23 @@ mod tests {
             avg_hrv: 55,
             score: Some(95.0),
             synced: false,
+            awake_minutes: None,
+            light_minutes: None,
+            deep_minutes: None,
+            rem_minutes: None,
+            sleep_latency_minutes: None,
+            waso_minutes: None,
+            sleep_efficiency: None,
+            wake_event_count: None,
+            cycle_count: None,
+            avg_respiratory_rate: None,
+            min_respiratory_rate: None,
+            max_respiratory_rate: None,
+            skin_temp_deviation_c: None,
+            sleep_need_hours: None,
+            sleep_debt_hours: None,
+            performance_score: None,
+            classifier_version: None,
         };
 
         let cycle = map_sleep_cycle(model);
@@ -95,6 +112,23 @@ mod tests {
             avg_hrv: 55,
             score: None, // No score stored
             synced: false,
+            awake_minutes: None,
+            light_minutes: None,
+            deep_minutes: None,
+            rem_minutes: None,
+            sleep_latency_minutes: None,
+            waso_minutes: None,
+            sleep_efficiency: None,
+            wake_event_count: None,
+            cycle_count: None,
+            avg_respiratory_rate: None,
+            min_respiratory_rate: None,
+            max_respiratory_rate: None,
+            skin_temp_deviation_c: None,
+            sleep_need_hours: None,
+            sleep_debt_hours: None,
+            performance_score: None,
+            classifier_version: None,
         };
 
         let cycle = map_sleep_cycle(model);

@@ -7,3 +7,5 @@ pub mod battery_log;
 pub mod heart_rate;
 pub mod packets;
 pub mod sleep_cycles;
+pub mod sleep_epochs;
+pub mod user_baselines;

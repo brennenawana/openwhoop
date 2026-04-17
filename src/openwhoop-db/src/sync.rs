@@ -134,19 +134,10 @@ impl<'a> DatabaseSync<'a> {
 
             let models: Vec<sleep_cycles::ActiveModel> = deduped
                 .into_values()
-                .map(|m| sleep_cycles::ActiveModel {
-                    id: Set(m.id),
-                    sleep_id: Set(m.sleep_id),
-                    start: Set(m.start),
-                    end: Set(m.end),
-                    min_bpm: Set(m.min_bpm),
-                    max_bpm: Set(m.max_bpm),
-                    avg_bpm: Set(m.avg_bpm),
-                    min_hrv: Set(m.min_hrv),
-                    max_hrv: Set(m.max_hrv),
-                    avg_hrv: Set(m.avg_hrv),
-                    score: Set(m.score),
-                    synced: Set(true),
+                .map(|m| {
+                    let mut am: sleep_cycles::ActiveModel = m.into();
+                    am.synced = Set(true);
+                    am
                 })
                 .collect();
 
