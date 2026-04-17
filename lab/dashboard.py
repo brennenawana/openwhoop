@@ -7,34 +7,37 @@ Run with:
     # or: marimo edit lab/dashboard.py
 
 See `docs/DEV_DASHBOARD_CONCEPT.md` for the vision.
-Backing table: `dev_notes` (see docs/DEV_DASHBOARD_CONCEPT.md §"MVP
-concrete plan"). Every panel below reads from the same SQLite file
-that the CLI and tray app use.
 
-Design principles:
-- Each cell (@app.cell) is independent; reactive dependencies are
-  explicit via function parameters.
-- Prefer pandas + plotly for charts — minimal ceremony.
-- Read-only queries only; mutations happen via the CLI (`openwhoop
-  note`) or the Rust pipeline, never from the notebook. Keeps the
-  dashboard side-effect-free and safe to open at any time.
+Marimo design constraints in this file:
+- Every top-level variable is unique across cells (Marimo's reactive
+  model requires it). Each panel's locals are prefixed (`inbox_*`,
+  `sleep_*`, `trend_*`, `log_*`, `commits_*`) to avoid collisions.
+- All cells read from the same `conn` + `mo` that cell 0 provides.
+- Read-only SQLite queries only — `openwhoop note` CLI is the write
+  path, dashboard is a display.
 """
 
-import marimo as mo
+import marimo
 
 __generated_with = "0.14.0"
-app = mo.App(width="medium")
+app = marimo.App(width="medium")
 
 
+# ---------------------------------------------------------------- cell 0
+# Setup: import marimo as `mo`, resolve DB path, expose a read-only
+# connection factory. Everything downstream depends on this cell.
 @app.cell
-def _():
+def setup():
+    import marimo as mo
     import os
     import sqlite3
     import subprocess
+    from datetime import datetime
     from pathlib import Path
 
-    # DB resolution order: env var, repo root, tray's live path.
     def resolve_db_path() -> str:
+        # Resolution order: OPENWHOOP_DB env → DATABASE_URL if sqlite://
+        # → repo's ./db.sqlite → tray's live DB → repo's ./db.sqlite.
         env = os.environ.get("OPENWHOOP_DB") or os.environ.get("DATABASE_URL", "")
         if env.startswith("sqlite://"):
             env = env.removeprefix("sqlite://").split("?", 1)[0]
@@ -43,43 +46,57 @@ def _():
         repo_db = Path(__file__).resolve().parent.parent / "db.sqlite"
         if repo_db.exists():
             return str(repo_db)
-        tray_db = Path.home() / "Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite"
+        tray_db = (
+            Path.home()
+            / "Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite"
+        )
         if tray_db.exists():
             return str(tray_db)
-        return str(repo_db)  # may not exist yet; panels will show emptiness
+        return str(repo_db)  # may not exist; panels render emptiness
 
     db_path = resolve_db_path()
+    repo_root = str(Path(__file__).resolve().parent.parent)
 
-    def conn():
-        # Read-only connection to make it obvious to reviewers that
-        # the dashboard never mutates data.
+    def open_ro():
+        """Open a fresh read-only sqlite connection. Callers must close."""
         c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         c.row_factory = sqlite3.Row
         return c
 
-    return conn, db_path, mo, Path, subprocess
+    return datetime, db_path, mo, open_ro, repo_root, subprocess
 
 
+# ---------------------------------------------------------------- cell 1
+# Title / DB identity.
 @app.cell
-def _(db_path, mo):
+def header(db_path, mo):
     mo.md(
-        f"""
-        # OpenWhoop Lab
+        f"""# OpenWhoop Lab
 
-        **DB:** `{db_path}`
+**DB:** `{db_path}`
 
-        Live view of the agent's recent work and the data behind it.
-        Read-only. Write notes via `openwhoop note "title"` from the CLI.
-        """
+Live view of agent activity and the data behind it. Read-only.
+Write notes via `openwhoop note "Title"` from the CLI.
+"""
     )
     return
 
 
+# ---------------------------------------------------------------- cell 2
+# Panel 1 — Agent inbox (unresolved dev_notes).
 @app.cell
-def _(conn, mo):
-    """Panel 1 — Unresolved agent notes (the inbox)."""
-    with conn() as c:
-        rows = c.execute(
+def inbox(mo, open_ro):
+    inbox_icon = {
+        "note": "📝",
+        "question": "❓",
+        "experiment": "🔬",
+        "diff": "🔁",
+        "status": "🚧",
+    }
+
+    inbox_con = open_ro()
+    try:
+        inbox_rows = inbox_con.execute(
             """
             SELECT id, created_at, author, kind, title, body_md,
                    related_commit, related_feature
@@ -89,45 +106,60 @@ def _(conn, mo):
             LIMIT 50
             """
         ).fetchall()
-
-    if not rows:
-        panel = mo.md("### 📥 Agent inbox\n\n_No open notes. Quiet morning._")
+    except Exception as inbox_err:
+        inbox_rows = []
+        inbox_error = f"_Could not read dev_notes: {inbox_err}_"
     else:
-        cards = []
-        for r in rows:
-            kind_icon = {
-                "note": "📝",
-                "question": "❓",
-                "experiment": "🔬",
-                "diff": "🔁",
-                "status": "🚧",
-            }.get(r["kind"], "•")
-            commit_badge = f"`{r['related_commit']}`" if r["related_commit"] else "—"
-            feature_badge = r["related_feature"] or "—"
-            body = (r["body_md"] or "").strip()
-            card = f"""
-**#{r['id']}** {kind_icon} **{r['title']}**
-<sub>{r['created_at']} · author `{r['author']}` · feature `{feature_badge}` · commit {commit_badge}</sub>
+        inbox_error = None
+    finally:
+        inbox_con.close()
 
-{body}
+    if inbox_error:
+        inbox_panel = mo.md(f"### 📥 Agent inbox\n\n{inbox_error}")
+    elif not inbox_rows:
+        inbox_panel = mo.md("### 📥 Agent inbox\n\n_No open notes. Quiet morning._")
+    else:
+        inbox_cards = []
+        for _inbox_r in inbox_rows:
+            _icon = inbox_icon.get(_inbox_r["kind"], "•")
+            _commit_badge = (
+                f"`{_inbox_r['related_commit']}`" if _inbox_r["related_commit"] else "—"
+            )
+            _feature_badge = _inbox_r["related_feature"] or "—"
+            _body = (_inbox_r["body_md"] or "").strip()
+            _card = f"""
+**#{_inbox_r['id']}** {_icon} **{_inbox_r['title']}**
+<sub>{_inbox_r['created_at']} · author `{_inbox_r['author']}` · feature `{_feature_badge}` · commit {_commit_badge}</sub>
+
+{_body}
 
 ---
 """
-            cards.append(card)
-        panel = mo.md(f"### 📥 Agent inbox ({len(rows)} open)\n\n" + "".join(cards))
-    panel
+            inbox_cards.append(_card)
+        inbox_panel = mo.md(
+            f"### 📥 Agent inbox ({len(inbox_rows)} open)\n\n" + "".join(inbox_cards)
+        )
+    inbox_panel
     return
 
 
+# ---------------------------------------------------------------- cell 3
+# Panel 2 — Latest sleep: hypnogram + stages + scalars.
 @app.cell
-def _(conn, mo):
-    """Panel 2 — Latest sleep: score + stage breakdown + hypnogram."""
-    import pandas as pd
-    import plotly.graph_objects as go
-    from datetime import datetime
+def latest_sleep(datetime, mo, open_ro):
+    import plotly.graph_objects as _sleep_go
 
-    with conn() as c:
-        cycle = c.execute(
+    sleep_stage_color = {
+        "Wake": "#e57373",
+        "Light": "#81c784",
+        "Deep": "#1976d2",
+        "REM": "#ba68c8",
+        "Unknown": "#bdbdbd",
+    }
+
+    sleep_con = open_ro()
+    try:
+        sleep_cycle = sleep_con.execute(
             """
             SELECT id, sleep_id, start, end, score, performance_score,
                    awake_minutes, light_minutes, deep_minutes, rem_minutes,
@@ -140,45 +172,54 @@ def _(conn, mo):
             LIMIT 1
             """
         ).fetchone()
-
-        if cycle is None:
-            epochs = []
-        else:
-            epochs = c.execute(
-                "SELECT epoch_start, epoch_end, stage FROM sleep_epochs WHERE sleep_cycle_id = ? ORDER BY epoch_start",
-                (cycle["id"],),
+        if sleep_cycle is not None:
+            sleep_epochs = sleep_con.execute(
+                "SELECT epoch_start, epoch_end, stage FROM sleep_epochs "
+                "WHERE sleep_cycle_id = ? ORDER BY epoch_start",
+                (sleep_cycle["id"],),
             ).fetchall()
-
-    if cycle is None:
-        panel = mo.md("### 🛌 Latest sleep\n\n_No sleep cycles yet._")
+        else:
+            sleep_epochs = []
+    except Exception as sleep_err:
+        sleep_cycle = None
+        sleep_epochs = []
+        sleep_error = f"_Could not read sleep_cycles: {sleep_err}_"
     else:
-        stage_color = {
-            "Wake": "#e57373",
-            "Light": "#81c784",
-            "Deep": "#1976d2",
-            "REM": "#ba68c8",
-            "Unknown": "#bdbdbd",
-        }
-        start_ts = datetime.fromisoformat(cycle["start"].replace(" ", "T"))
-        end_ts = datetime.fromisoformat(cycle["end"].replace(" ", "T"))
-        duration_min = (end_ts - start_ts).total_seconds() / 60
+        sleep_error = None
+    finally:
+        sleep_con.close()
 
-        # Hypnogram — horizontal colored bands.
-        hypno_fig = go.Figure()
-        if epochs:
-            for e in epochs:
-                hypno_fig.add_trace(
-                    go.Scatter(
-                        x=[e["epoch_start"], e["epoch_end"]],
-                        y=[e["stage"], e["stage"]],
-                        mode="lines",
-                        line=dict(color=stage_color.get(e["stage"], "#bdbdbd"), width=18),
-                        showlegend=False,
-                        hovertemplate=f"{e['stage']} · %{{x}}<extra></extra>",
-                    )
+    def _opt(x, fmt="{:.1f}"):
+        return fmt.format(x) if x is not None else "—"
+
+    if sleep_error:
+        sleep_panel = mo.md(f"### 🛌 Latest sleep\n\n{sleep_error}")
+    elif sleep_cycle is None:
+        sleep_panel = mo.md("### 🛌 Latest sleep\n\n_No sleep cycles yet._")
+    else:
+        sleep_start_ts = datetime.fromisoformat(sleep_cycle["start"].replace(" ", "T"))
+        sleep_end_ts = datetime.fromisoformat(sleep_cycle["end"].replace(" ", "T"))
+        sleep_duration_min = (sleep_end_ts - sleep_start_ts).total_seconds() / 60
+
+        hypno_fig = _sleep_go.Figure()
+        for _ep in sleep_epochs:
+            hypno_fig.add_trace(
+                _sleep_go.Scatter(
+                    x=[_ep["epoch_start"], _ep["epoch_end"]],
+                    y=[_ep["stage"], _ep["stage"]],
+                    mode="lines",
+                    line=dict(
+                        color=sleep_stage_color.get(_ep["stage"], "#bdbdbd"), width=18
+                    ),
+                    showlegend=False,
+                    hovertemplate=f"{_ep['stage']} · %{{x}}<extra></extra>",
                 )
+            )
         hypno_fig.update_layout(
-            title=f"Hypnogram — {cycle['start']} → {cycle['end']} ({duration_min:.0f} min)",
+            title=(
+                f"Hypnogram — {sleep_cycle['start']} → {sleep_cycle['end']} "
+                f"({sleep_duration_min:.0f} min)"
+            ),
             xaxis_title="time",
             yaxis=dict(
                 categoryorder="array",
@@ -188,29 +229,26 @@ def _(conn, mo):
             margin=dict(l=40, r=20, t=40, b=30),
         )
 
-        # Stage breakdown as horizontal stacked bar.
-        stage_min = {
-            "Awake": cycle["awake_minutes"] or 0,
-            "Light": cycle["light_minutes"] or 0,
-            "Deep": cycle["deep_minutes"] or 0,
-            "REM": cycle["rem_minutes"] or 0,
+        stage_min_map = {
+            "Awake": sleep_cycle["awake_minutes"] or 0,
+            "Light": sleep_cycle["light_minutes"] or 0,
+            "Deep": sleep_cycle["deep_minutes"] or 0,
+            "REM": sleep_cycle["rem_minutes"] or 0,
         }
-        stage_fig = go.Figure()
-        cum = 0
-        for stg, m in stage_min.items():
+        stage_fig = _sleep_go.Figure()
+        for _stg, _m in stage_min_map.items():
             stage_fig.add_trace(
-                go.Bar(
+                _sleep_go.Bar(
                     y=["minutes"],
-                    x=[m],
-                    name=stg,
+                    x=[_m],
+                    name=_stg,
                     orientation="h",
-                    marker_color=stage_color.get(
-                        "Wake" if stg == "Awake" else stg, "#bdbdbd"
+                    marker_color=sleep_stage_color.get(
+                        "Wake" if _stg == "Awake" else _stg, "#bdbdbd"
                     ),
-                    hovertemplate=f"{stg}: {m:.1f} min<extra></extra>",
+                    hovertemplate=f"{_stg}: {_m:.1f} min<extra></extra>",
                 )
             )
-            cum += m
         stage_fig.update_layout(
             barmode="stack",
             height=120,
@@ -218,29 +256,30 @@ def _(conn, mo):
             showlegend=True,
         )
 
-        # Number block.
-        md = f"""
-### 🛌 Latest sleep — {cycle['sleep_id']}
+        sleep_md = f"""
+### 🛌 Latest sleep — {sleep_cycle['sleep_id']}
 
-- **Performance score:** **{cycle['performance_score']:.1f}** / 100 (classifier `{cycle['classifier_version'] or '—'}`)
-- **Efficiency:** {cycle['sleep_efficiency']:.1f}% · **Latency:** {cycle['sleep_latency_minutes']:.1f} min · **WASO:** {cycle['waso_minutes']:.1f} min
-- **Cycles:** {cycle['cycle_count']} · **Wake events:** {cycle['wake_event_count']}
-- **Respiratory:** {cycle['avg_respiratory_rate']:.1f} bpm · **Skin temp Δ:** {cycle['skin_temp_deviation_c']:.2f}°C
-- **Sleep need:** {cycle['sleep_need_hours']:.1f} h · **Debt:** {cycle['sleep_debt_hours']:.2f} h
+- **Performance score:** **{_opt(sleep_cycle['performance_score'])}** / 100 (classifier `{sleep_cycle['classifier_version'] or '—'}`)
+- **Efficiency:** {_opt(sleep_cycle['sleep_efficiency'])}% · **Latency:** {_opt(sleep_cycle['sleep_latency_minutes'])} min · **WASO:** {_opt(sleep_cycle['waso_minutes'])} min
+- **Cycles:** {sleep_cycle['cycle_count'] if sleep_cycle['cycle_count'] is not None else '—'} · **Wake events:** {sleep_cycle['wake_event_count'] if sleep_cycle['wake_event_count'] is not None else '—'}
+- **Respiratory:** {_opt(sleep_cycle['avg_respiratory_rate'])} bpm · **Skin temp Δ:** {_opt(sleep_cycle['skin_temp_deviation_c'], '{:.2f}')} °C
+- **Sleep need:** {_opt(sleep_cycle['sleep_need_hours'])} h · **Debt:** {_opt(sleep_cycle['sleep_debt_hours'], '{:.2f}')} h
 """
-        panel = mo.vstack([mo.md(md), stage_fig, hypno_fig])
-    panel
+        sleep_panel = mo.vstack([mo.md(sleep_md), stage_fig, hypno_fig])
+    sleep_panel
     return
 
 
+# ---------------------------------------------------------------- cell 4
+# Panel 3 — 14-night trend (score, efficiency, Deep %, REM %).
 @app.cell
-def _(conn, mo):
-    """Panel 3 — 14-night trends: score, efficiency, Deep %, REM %."""
-    import pandas as pd
-    import plotly.graph_objects as go
+def trend(mo, open_ro):
+    import pandas as _trend_pd
+    import plotly.graph_objects as _trend_go
 
-    with conn() as c:
-        rows = c.execute(
+    trend_con = open_ro()
+    try:
+        trend_rows = trend_con.execute(
             """
             SELECT sleep_id, end, performance_score, sleep_efficiency,
                    awake_minutes, light_minutes, deep_minutes, rem_minutes
@@ -250,107 +289,167 @@ def _(conn, mo):
             LIMIT 14
             """
         ).fetchall()
-    if not rows:
-        panel = mo.md("### 📈 14-night trend\n\n_Not enough nights yet._")
+    except Exception as trend_err:
+        trend_rows = []
+        trend_error = f"_Could not read sleep_cycles: {trend_err}_"
     else:
-        df = pd.DataFrame([dict(r) for r in rows]).iloc[::-1]
-        total = df["awake_minutes"] + df["light_minutes"] + df["deep_minutes"] + df["rem_minutes"]
-        df["deep_pct"] = (df["deep_minutes"] / total * 100).where(total > 0, 0)
-        df["rem_pct"] = (df["rem_minutes"] / total * 100).where(total > 0, 0)
+        trend_error = None
+    finally:
+        trend_con.close()
 
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(x=df["sleep_id"], y=df["performance_score"], name="Performance score", yaxis="y1")
+    if trend_error:
+        trend_panel = mo.md(f"### 📈 14-night trend\n\n{trend_error}")
+    elif len(trend_rows) < 2:
+        trend_panel = mo.md(
+            f"### 📈 14-night trend\n\n_{len(trend_rows)} night(s) so far — need at "
+            "least 2 classified nights to draw a trend._"
         )
-        fig.add_trace(
-            go.Scatter(x=df["sleep_id"], y=df["sleep_efficiency"], name="Efficiency %", yaxis="y1")
+    else:
+        trend_df = _trend_pd.DataFrame([dict(r) for r in trend_rows]).iloc[::-1]
+        trend_total = (
+            trend_df["awake_minutes"].fillna(0)
+            + trend_df["light_minutes"].fillna(0)
+            + trend_df["deep_minutes"].fillna(0)
+            + trend_df["rem_minutes"].fillna(0)
         )
-        fig.add_trace(
-            go.Scatter(x=df["sleep_id"], y=df["deep_pct"], name="Deep %", yaxis="y2")
+        trend_df["deep_pct"] = (
+            trend_df["deep_minutes"].fillna(0) / trend_total * 100
+        ).where(trend_total > 0, 0)
+        trend_df["rem_pct"] = (
+            trend_df["rem_minutes"].fillna(0) / trend_total * 100
+        ).where(trend_total > 0, 0)
+
+        trend_fig = _trend_go.Figure()
+        trend_fig.add_trace(
+            _trend_go.Scatter(
+                x=trend_df["sleep_id"],
+                y=trend_df["performance_score"],
+                name="Performance score",
+                yaxis="y1",
+            )
         )
-        fig.add_trace(
-            go.Scatter(x=df["sleep_id"], y=df["rem_pct"], name="REM %", yaxis="y2")
+        trend_fig.add_trace(
+            _trend_go.Scatter(
+                x=trend_df["sleep_id"],
+                y=trend_df["sleep_efficiency"],
+                name="Efficiency %",
+                yaxis="y1",
+            )
         )
-        fig.update_layout(
+        trend_fig.add_trace(
+            _trend_go.Scatter(
+                x=trend_df["sleep_id"], y=trend_df["deep_pct"], name="Deep %", yaxis="y2"
+            )
+        )
+        trend_fig.add_trace(
+            _trend_go.Scatter(
+                x=trend_df["sleep_id"], y=trend_df["rem_pct"], name="REM %", yaxis="y2"
+            )
+        )
+        trend_fig.update_layout(
             title="14-night sleep trends",
             height=320,
             yaxis=dict(title="Score / Efficiency", range=[0, 100]),
             yaxis2=dict(title="Stage %", overlaying="y", side="right", range=[0, 50]),
             margin=dict(l=40, r=40, t=40, b=30),
         )
-        panel = fig
-    panel
+        trend_panel = trend_fig
+    trend_panel
     return
 
 
+# ---------------------------------------------------------------- cell 5
+# Panel 4 — Sync log (last 10 attempts).
 @app.cell
-def _(conn, mo):
-    """Panel 4 — Sync log: most recent attempts + outcome + error."""
-    with conn() as c:
-        rows = c.execute(
+def sync_log_panel(mo, open_ro):
+    log_icon = {
+        "success": "✅",
+        "error": "❌",
+        "cancelled": "⚠️",
+        "timeout": "⏱",
+        "in_progress": "⏳",
+    }
+
+    log_con = open_ro()
+    try:
+        log_rows = log_con.execute(
             """
             SELECT id, attempt_started_at, attempt_ended_at, outcome,
-                   error_message, heart_rate_rows_added, sleep_cycles_created, trigger
+                   error_message, heart_rate_rows_added, sleep_cycles_created,
+                   trigger
             FROM sync_log
             ORDER BY attempt_started_at DESC
             LIMIT 10
             """
         ).fetchall()
-    if not rows:
-        panel = mo.md("### 🔄 Sync log\n\n_No sync attempts recorded yet._")
+    except Exception as log_err:
+        log_rows = []
+        log_error = f"_Could not read sync_log: {log_err}_"
     else:
-        lines = ["### 🔄 Sync log (last 10 attempts)\n"]
-        for r in rows:
-            icon = {
-                "success": "✅",
-                "error": "❌",
-                "cancelled": "⚠️",
-                "timeout": "⏱",
-                "in_progress": "⏳",
-            }.get(r["outcome"], "•")
-            counts = f"+{r['heart_rate_rows_added'] or 0} HR rows · +{r['sleep_cycles_created'] or 0} cycles"
-            trigger = r["trigger"] or "—"
-            line = f"- {icon} **{r['attempt_started_at']}** — `{r['outcome']}` ({trigger}) · {counts}"
-            if r["error_message"]:
-                line += f"\n    ↳ error: `{r['error_message']}`"
-            lines.append(line)
-        panel = mo.md("\n".join(lines))
-    panel
+        log_error = None
+    finally:
+        log_con.close()
+
+    if log_error:
+        log_panel = mo.md(f"### 🔄 Sync log\n\n{log_error}")
+    elif not log_rows:
+        log_panel = mo.md("### 🔄 Sync log\n\n_No sync attempts recorded yet._")
+    else:
+        log_lines = ["### 🔄 Sync log (last 10 attempts)\n"]
+        for _log_r in log_rows:
+            _icon = log_icon.get(_log_r["outcome"], "•")
+            _counts = (
+                f"+{_log_r['heart_rate_rows_added'] or 0} HR rows · "
+                f"+{_log_r['sleep_cycles_created'] or 0} cycles"
+            )
+            _trigger = _log_r["trigger"] or "—"
+            _line = (
+                f"- {_icon} **{_log_r['attempt_started_at']}** — "
+                f"`{_log_r['outcome']}` ({_trigger}) · {_counts}"
+            )
+            if _log_r["error_message"]:
+                _line += f"\n    ↳ error: `{_log_r['error_message']}`"
+            log_lines.append(_line)
+        log_panel = mo.md("\n".join(log_lines))
+    log_panel
     return
 
 
+# ---------------------------------------------------------------- cell 6
+# Panel 5 — Recent git commits.
 @app.cell
-def _(mo, subprocess):
-    """Panel 5 — Commit timeline: recent git activity."""
+def commit_timeline(mo, repo_root, subprocess):
     try:
-        out = subprocess.run(
+        commits_out = subprocess.run(
             ["git", "log", "--oneline", "--decorate", "-20", "--no-color"],
             capture_output=True,
             text=True,
             check=True,
-            cwd=str(__import__("pathlib").Path(__file__).resolve().parent.parent),
+            cwd=repo_root,
         )
-        commits = out.stdout.strip().split("\n")
-    except Exception as e:  # noqa: BLE001
-        commits = [f"_git log failed: {e}_"]
-    panel = mo.md(
-        "### 🌳 Recent commits\n\n```\n" + "\n".join(commits[:20]) + "\n```"
+        commits_list = commits_out.stdout.strip().split("\n")
+    except Exception as commits_err:  # noqa: BLE001
+        commits_list = [f"_git log failed: {commits_err}_"]
+    commits_panel = mo.md(
+        "### 🌳 Recent commits\n\n```\n" + "\n".join(commits_list[:20]) + "\n```"
     )
-    panel
+    commits_panel
     return
 
 
+# ---------------------------------------------------------------- cell 7
+# Footer.
 @app.cell
-def _(mo):
+def footer(mo):
     mo.md(
-        """
-        ---
-        <sub>
-        Future panels (tier 2/3): threshold sliders, before/after diffs,
-        events/alarm timeline, wear-time + activity rollup, HRV trend.
-        See `docs/DEV_DASHBOARD_CONCEPT.md` for the roadmap.
-        </sub>
-        """
+        """---
+<sub>
+Future panels (tier 2/3): threshold sliders, before/after diffs,
+events/alarm timeline, wear-time + activity rollup, HRV trend,
+in-dashboard note resolution. See
+`docs/DEV_DASHBOARD_CONCEPT.md` for the roadmap.
+</sub>
+"""
     )
     return
 
