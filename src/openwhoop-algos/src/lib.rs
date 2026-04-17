@@ -25,3 +25,6 @@ pub use temperature::{SkinTempCalculator, SkinTempScore};
 pub mod helpers;
 
 pub mod sleep_staging;
+
+pub(crate) mod wear_tracking;
+pub use wear_tracking::{WearEvent, WearPeriod, WearSource, SkinContactRun, derive_wear_periods};

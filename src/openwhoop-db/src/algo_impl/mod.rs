@@ -6,6 +6,7 @@ mod sleep_staging;
 mod spo2;
 mod stress;
 mod temperature;
+mod wear_periods;
 pub use alarm_history::AlarmAction;
 pub use sleep_staging::StageCycleUpdate;
 pub use temperature::TempReading;

@@ -11,3 +11,4 @@ pub mod packets;
 pub mod sleep_cycles;
 pub mod sleep_epochs;
 pub mod user_baselines;
+pub mod wear_periods;

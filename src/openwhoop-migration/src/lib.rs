@@ -16,6 +16,7 @@ pub mod m20260416_000000_sleep_staging;
 mod m20260417_000000_events;
 mod m20260417_010000_device_info;
 mod m20260417_020000_alarm_history;
+mod m20260417_030000_wear_periods;
 
 pub struct Migrator;
 
@@ -39,6 +40,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260417_000000_events::Migration),
             Box::new(m20260417_010000_device_info::Migration),
             Box::new(m20260417_020000_alarm_history::Migration),
+            Box::new(m20260417_030000_wear_periods::Migration),
         ]
     }
 }
