@@ -179,6 +179,32 @@ pub enum OpenWhoopCommand {
         #[arg(long, default_value = "rule-v1")]
         classifier: String,
     },
+    ///
+    /// Write a dev note into the dev_notes table. The dashboard
+    /// (see docs/DEV_DASHBOARD_CONCEPT.md) surfaces these as an
+    /// inbox for the dev.
+    ///
+    Note {
+        /// Title (required, positional). Keep it short and specific.
+        title: String,
+        /// note | question | experiment | diff | status. Default: note.
+        #[arg(long, default_value = "note")]
+        kind: String,
+        /// Markdown body. Can be multi-paragraph.
+        #[arg(long)]
+        body: Option<String>,
+        /// Feature scope for filtering in the dashboard. Examples:
+        /// "sleep_staging", "quick_wins", "classifier", "wear_tracking".
+        #[arg(long)]
+        feature: Option<String>,
+        /// Git SHA this note relates to. If omitted, auto-resolves
+        /// to current HEAD via `git rev-parse`.
+        #[arg(long)]
+        commit: Option<String>,
+        /// Who authored the note. Default "agent".
+        #[arg(long, default_value = "agent")]
+        author: String,
+    },
 }
 
 #[tokio::main]
@@ -399,6 +425,22 @@ fn parse_date_arg(s: &str) -> anyhow::Result<NaiveDateTime> {
     anyhow::bail!("invalid date '{s}'; use YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
 }
 
+/// Resolve current git HEAD SHA (short form). Silently returns None
+/// if git isn't available or we're not in a repo — note-writing
+/// should never block on a missing commit ref.
+fn git_head_sha() -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 impl OpenWhoopCli {
     async fn run(self) -> anyhow::Result<()> {
         if let OpenWhoopCommand::DownloadFirmware {
@@ -411,6 +453,40 @@ impl OpenWhoopCli {
         } = &self.subcommand
         {
             return download_firmware(email, password, device_name, maxim, nordic, output_dir).await;
+        }
+
+        if let OpenWhoopCommand::Note {
+            title,
+            kind,
+            body,
+            feature,
+            commit,
+            author,
+        } = &self.subcommand
+        {
+            let kind_enum = openwhoop::db::DevNoteKind::parse(kind.as_str())
+                .ok_or_else(|| anyhow!(
+                    "unknown --kind '{kind}'; expected one of note|question|experiment|diff|status"
+                ))?;
+            let resolved_commit = match commit.clone() {
+                Some(s) => Some(s),
+                None => git_head_sha(),
+            };
+            let input = openwhoop::db::DevNoteInput {
+                author: Some(author.clone()),
+                kind: Some(kind_enum),
+                title: title.clone(),
+                body_md: body.clone(),
+                related_commit: resolved_commit,
+                related_feature: feature.clone(),
+                ..Default::default()
+            };
+            let db = DatabaseHandler::new(self.database_url.clone()).await;
+            let id = db
+                .create_dev_note(chrono::Local::now().naive_local(), input)
+                .await?;
+            println!("note #{id} created (kind={kind}, author={author})");
+            return Ok(());
         }
 
         if let OpenWhoopCommand::ReclassifySleep {
@@ -749,6 +825,9 @@ impl OpenWhoopCli {
                 unreachable!("handled before BLE/DB init")
             }
             OpenWhoopCommand::ReclassifySleep { .. } => {
+                unreachable!("handled before BLE init")
+            }
+            OpenWhoopCommand::Note { .. } => {
                 unreachable!("handled before BLE init")
             }
         }
