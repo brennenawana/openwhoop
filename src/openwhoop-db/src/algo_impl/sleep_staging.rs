@@ -313,6 +313,23 @@ impl DatabaseHandler {
         Ok(out)
     }
 
+    /// Maximum observed BPM across the entire `heart_rate` table.
+    /// Used as a max-HR proxy for strain computation when we don't
+    /// have the user's age (strain needs both max and resting HR).
+    /// Returns `None` on an empty table.
+    pub async fn max_observed_bpm(&self) -> anyhow::Result<Option<i16>> {
+        let rows: Vec<Option<i16>> = heart_rate::Entity::find()
+            .filter(heart_rate::Column::Bpm.gt(0))
+            .order_by_desc(heart_rate::Column::Bpm)
+            .limit(1)
+            .select_only()
+            .column(heart_rate::Column::Bpm)
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        Ok(rows.into_iter().next().flatten())
+    }
+
     /// Average of `heart_rate.stress` (Baevsky 0-10) across the time
     /// range. Returns `None` when no rows in the range have a stress
     /// value (e.g. before `calculate-stress` has been run). Used by

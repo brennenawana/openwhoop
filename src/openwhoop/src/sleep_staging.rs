@@ -7,7 +7,7 @@
 //! that cycle `classifier_version = "failed"`, then continues.
 
 use chrono::{Local, NaiveDateTime, TimeDelta};
-use openwhoop_algos::SleepConsistencyAnalyzer;
+use openwhoop_algos::{SleepConsistencyAnalyzer, StrainCalculator};
 use openwhoop_algos::sleep_staging::{
     self, ArchitectureMetrics, CLASSIFIER_VERSION, EpochFeatures, EpochStage, NightSleep,
     PerformanceScore, RespiratoryStats, ScoringInputs, SleepNeedInputs, UserBaseline,
@@ -305,14 +305,13 @@ async fn stage_one_cycle(
     // 6. Skin temperature deviation vs rolling baseline.
     let skin_deviation = compute_skin_temp_deviation(db, cycle, baseline).await?;
 
-    // 7. Sleep need / debt. prior_day_strain is not yet computed in
-    // this codebase — pass None and let base_need carry it. When a
-    // strain calculator is added, wire it here.
+    // 7. Sleep need / debt.
     let nap_minutes = db.sum_nap_minutes_in_prior_day(cycle.end).await.unwrap_or(0.0);
     let debt = compute_prior_sleep_debt(db, cycle.start).await?;
+    let prior_day_strain = compute_prior_day_strain(db, baseline, cycle.start).await;
     let need_inputs = SleepNeedInputs {
         base_need_hours: None,
-        prior_day_strain: None,
+        prior_day_strain,
         rolling_7d_debt_hours: debt,
         nap_minutes,
     };
@@ -382,6 +381,49 @@ async fn compute_skin_temp_deviation(
             Ok(None)
         }
     }
+}
+
+/// WHOOP-scale strain (0-21) across the 24 hours before this cycle's
+/// start. Feeds `SleepNeedInputs.prior_day_strain`.
+///
+/// Returns `None` when we can't confidently compute it — too few
+/// readings in the window (<10 min), or max_hr/resting_hr missing.
+/// Uses:
+/// - `resting_hr` from the user baseline, or `POPULATION_RESTING_HR`
+///   (62) as a fallback.
+/// - `max_observed_bpm` from the full heart_rate table as a
+///   personalized max-HR proxy, or 190 as a fallback (rough adult
+///   population max). We don't have the user's age on record.
+async fn compute_prior_day_strain(
+    db: &DatabaseHandler,
+    baseline: &UserBaseline,
+    current_cycle_start: NaiveDateTime,
+) -> Option<f64> {
+    let prior_day_start = current_cycle_start - TimeDelta::hours(24);
+    let history = db
+        .search_history(SearchHistory {
+            from: Some(prior_day_start),
+            to: Some(current_cycle_start),
+            limit: None,
+        })
+        .await
+        .ok()?;
+
+    let max_hr = db
+        .max_observed_bpm()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(190);
+    let resting_hr = baseline
+        .resting_hr
+        .or(Some(openwhoop_algos::sleep_staging::constants::POPULATION_RESTING_HR))
+        .and_then(|v| u8::try_from(v.round() as i32).ok())
+        .unwrap_or(62);
+
+    let calc = StrainCalculator::new(max_hr, resting_hr);
+    calc.calculate(&history).map(|s| s.0)
 }
 
 /// Compute a 0-100 sleep-consistency score for the current cycle by
