@@ -499,10 +499,54 @@ impl OpenWhoopCli {
                 }
             }
             OpenWhoopCommand::DetectEvents => {
+                // Feature 6: wrap the full pipeline in a sync_log attempt.
+                // Logger failures must NOT block the pipeline — we swallow
+                // write errors and keep going.
+                let audit_db = DatabaseHandler::new(self.database_url.clone()).await;
+                let started_at = chrono::Local::now().naive_local();
+                let log_id = audit_db
+                    .begin_sync_attempt(started_at, Some("manual".to_string()))
+                    .await
+                    .ok();
+
                 let whoop = OpenWhoop::new(db_handler);
-                whoop.detect_sleeps().await?;
-                whoop.detect_events().await?;
-                whoop.stage_sleep().await?;
+                let pipeline_result: anyhow::Result<()> = async {
+                    whoop.detect_sleeps().await?;
+                    whoop.detect_events().await?;
+                    // Feature 4: wear-period tracking BEFORE sleep staging
+                    // (not strictly required, but lets staging optionally
+                    // consult wear data in the future).
+                    whoop.update_wear_periods().await?;
+                    whoop.stage_sleep().await?;
+                    // Feature 5 + 7: daytime HRV + activity classification,
+                    // both scoped to wear_periods and excluding sleep.
+                    whoop.compute_daytime_hrv().await?;
+                    whoop.classify_activities().await?;
+                    Ok(())
+                }
+                .await;
+
+                if let Some(id) = log_id {
+                    let ended_at = chrono::Local::now().naive_local();
+                    match &pipeline_result {
+                        Ok(_) => {
+                            let _ = audit_db
+                                .finish_sync_attempt(
+                                    id,
+                                    ended_at,
+                                    openwhoop::db::SyncOutcome::Success,
+                                    openwhoop::db::SyncCounts::default(),
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = audit_db
+                                .fail_sync_attempt(id, ended_at, format!("{e:#}"))
+                                .await;
+                        }
+                    }
+                }
+                pipeline_result?;
             }
             OpenWhoopCommand::SleepStats => {
                 let whoop = OpenWhoop::new(db_handler);

@@ -383,6 +383,113 @@ impl OpenWhoop {
         Ok(())
     }
 
+    /// Feature 4: derive wear periods for the last 14 days from the
+    /// events table (WristOn/Off) + heart_rate.sensor_data skin_contact.
+    /// Idempotency: deletes existing wear_periods rows in the range
+    /// before inserting fresh. Safe to re-run.
+    pub async fn update_wear_periods(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::derive_wear_periods;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let events = self
+            .database
+            .get_wrist_events(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let runs = self
+            .database
+            .get_skin_contact_runs(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let periods = derive_wear_periods(&events, &runs, window_start, window_end);
+        info!("wear_periods: derived {} periods", periods.len());
+        for p in &periods {
+            if let Err(e) = self.database.create_wear_period(p).await {
+                log::warn!("failed to persist wear period: {e:#}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Feature 5: compute daytime HRV samples for each wear period in
+    /// the last 14 days, skipping windows that overlap sleep cycles.
+    pub async fn compute_daytime_hrv(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::compute_daytime_hrv;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let wear_periods = self
+            .database
+            .get_wear_periods_overlapping(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let sleep_cycles = self.database.get_sleep_cycles(Some(window_start)).await?;
+        let sleep_windows: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> =
+            sleep_cycles.iter().map(|c| (c.start, c.end)).collect();
+        let resting_hr = sleep_cycles
+            .last()
+            .map(|c| f64::from(c.min_bpm))
+            .unwrap_or(60.0);
+        let mut total = 0usize;
+        for wp in &wear_periods {
+            let readings = self
+                .database
+                .search_history(SearchHistory {
+                    from: Some(wp.start),
+                    to: Some(wp.end),
+                    limit: None,
+                })
+                .await?;
+            let samples = compute_daytime_hrv(wp.start, wp.end, &readings, &sleep_windows, resting_hr);
+            for s in &samples {
+                if let Err(e) = self.database.create_hrv_sample(s).await {
+                    log::warn!("failed to persist hrv sample: {e:#}");
+                }
+            }
+            total += samples.len();
+        }
+        info!("daytime hrv: {} samples across {} wear periods", total, wear_periods.len());
+        Ok(())
+    }
+
+    /// Feature 7: rule-v0 activity classification in 1-minute windows
+    /// across wear periods in the last 14 days, excluding sleep.
+    pub async fn classify_activities(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::classify_activities;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let wear_periods = self
+            .database
+            .get_wear_periods_overlapping(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let sleep_cycles = self.database.get_sleep_cycles(Some(window_start)).await?;
+        let sleep_windows: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> =
+            sleep_cycles.iter().map(|c| (c.start, c.end)).collect();
+        let mut total = 0usize;
+        for wp in &wear_periods {
+            let readings = self
+                .database
+                .search_history(SearchHistory {
+                    from: Some(wp.start),
+                    to: Some(wp.end),
+                    limit: None,
+                })
+                .await?;
+            let samples = classify_activities(wp.start, wp.end, &readings, &sleep_windows);
+            for s in &samples {
+                if let Err(e) = self.database.create_activity_sample(s).await {
+                    log::warn!("failed to persist activity sample: {e:#}");
+                }
+            }
+            total += samples.len();
+        }
+        info!("activity classification: {} samples across {} wear periods", total, wear_periods.len());
+        Ok(())
+    }
+
     pub async fn calculate_spo2(&self) -> anyhow::Result<()> {
         loop {
             let last = self.database.last_spo2_time().await?;
