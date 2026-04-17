@@ -186,8 +186,31 @@ impl OpenWhoop {
                     .database
                     .create_event(ts, 68, "RunAlarm", None)
                     .await;
+                // Feature 3: mirror the fired alarm to alarm_history for
+                // easy querying alongside set/cleared lifecycle rows.
+                let _ = self
+                    .database
+                    .create_alarm_entry(
+                        openwhoop_db::AlarmAction::Fired,
+                        ts,
+                        Some(ts),
+                        Some(true),
+                    )
+                    .await;
             }
-            WhoopData::AlarmInfo { .. } => {}
+            WhoopData::AlarmInfo { enabled, unix } => {
+                let now = Local::now().naive_local();
+                let scheduled = unix_to_local(unix).ok();
+                let _ = self
+                    .database
+                    .create_alarm_entry(
+                        openwhoop_db::AlarmAction::Queried,
+                        now,
+                        scheduled,
+                        Some(enabled),
+                    )
+                    .await;
+            }
             WhoopData::Event { unix, event } => {
                 let ts = unix_to_local(unix)?;
                 let id = event.as_u8() as i32;

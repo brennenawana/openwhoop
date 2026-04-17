@@ -440,7 +440,7 @@ impl OpenWhoopCli {
         }
 
         let adapter = self.create_ble_adapter().await?;
-        let db_handler = DatabaseHandler::new(self.database_url).await;
+        let db_handler = DatabaseHandler::new(self.database_url.clone()).await;
 
         match self.subcommand {
             OpenWhoopCommand::Scan => {
@@ -570,6 +570,10 @@ impl OpenWhoopCli {
             }
             OpenWhoopCommand::SetAlarm { whoop, alarm_time } => {
                 let peripheral = scan_command(&adapter, Some(whoop)).await?;
+                // Feature 3: separate handle to the same DB for the
+                // alarm-history write, since db_handler is moved into
+                // WhoopDevice below.
+                let audit_db = DatabaseHandler::new(self.database_url.clone()).await;
                 let mut whoop =
                     WhoopDevice::new(peripheral, adapter, db_handler, self.debug_packets);
                 whoop.connect().await?;
@@ -591,13 +595,32 @@ impl OpenWhoopCli {
                 let time = time.with_timezone(&Local);
 
                 println!("Alarm time set for: {}", time.format("%Y-%m-%d %H:%M:%S"));
+                let _ = audit_db
+                    .create_alarm_entry(
+                        openwhoop::db::AlarmAction::Set,
+                        chrono::Local::now().naive_local(),
+                        Some(time.naive_local()),
+                        Some(true),
+                    )
+                    .await;
             }
             OpenWhoopCommand::GetAlarm { whoop } => {
                 let peripheral = scan_command(&adapter, Some(whoop)).await?;
+                let audit_db = DatabaseHandler::new(self.database_url.clone()).await;
                 let mut whoop = WhoopDevice::new(peripheral, adapter, db_handler, false);
                 whoop.connect().await?;
                 let data = whoop.get_alarm().await?;
                 if let openwhoop_codec::WhoopData::AlarmInfo { enabled, unix } = data {
+                    let scheduled = chrono::DateTime::from_timestamp(i64::from(unix), 0)
+                        .map(|d| d.naive_utc());
+                    let _ = audit_db
+                        .create_alarm_entry(
+                            openwhoop::db::AlarmAction::Queried,
+                            chrono::Local::now().naive_local(),
+                            scheduled,
+                            Some(enabled),
+                        )
+                        .await;
                     if enabled {
                         let alarm_time = DateTime::from_timestamp(i64::from(unix), 0)
                             .ok_or_else(|| anyhow!("Invalid alarm timestamp"))?

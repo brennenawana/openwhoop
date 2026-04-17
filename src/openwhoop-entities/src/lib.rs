@@ -3,6 +3,7 @@
 pub mod prelude;
 
 pub mod activities;
+pub mod alarm_history;
 pub mod device_info;
 pub mod events;
 pub mod heart_rate;
