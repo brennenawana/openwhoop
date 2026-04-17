@@ -14,6 +14,14 @@ mod m20250602_000001_spo2;
 mod m20250603_000000_skin_temp;
 mod m20260415_000000_battery_log;
 pub mod m20260416_000000_sleep_staging;
+mod m20260417_000000_events;
+mod m20260417_010000_device_info;
+mod m20260417_020000_alarm_history;
+mod m20260417_030000_wear_periods;
+mod m20260417_040000_hrv_samples;
+mod m20260417_050000_sync_log;
+mod m20260417_060000_activity_samples;
+mod m20260418_000000_dev_notes;
 
 pub struct Migrator;
 
@@ -35,6 +43,14 @@ impl MigratorTrait for Migrator {
             Box::new(m20250603_000000_skin_temp::Migration),
             Box::new(m20260415_000000_battery_log::Migration),
             Box::new(m20260416_000000_sleep_staging::Migration),
+            Box::new(m20260417_000000_events::Migration),
+            Box::new(m20260417_010000_device_info::Migration),
+            Box::new(m20260417_020000_alarm_history::Migration),
+            Box::new(m20260417_030000_wear_periods::Migration),
+            Box::new(m20260417_040000_hrv_samples::Migration),
+            Box::new(m20260417_050000_sync_log::Migration),
+            Box::new(m20260417_060000_activity_samples::Migration),
+            Box::new(m20260418_000000_dev_notes::Migration),
         ]
     }
 }

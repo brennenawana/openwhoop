@@ -3,9 +3,17 @@
 pub mod prelude;
 
 pub mod activities;
+pub mod activity_samples;
+pub mod alarm_history;
 pub mod battery_log;
+pub mod dev_notes;
+pub mod device_info;
+pub mod events;
 pub mod heart_rate;
+pub mod hrv_samples;
 pub mod packets;
 pub mod sleep_cycles;
 pub mod sleep_epochs;
+pub mod sync_log;
 pub mod user_baselines;
+pub mod wear_periods;

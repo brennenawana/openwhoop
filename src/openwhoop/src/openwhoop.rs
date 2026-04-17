@@ -1,10 +1,10 @@
 use btleplug::api::ValueNotification;
-use chrono::{DateTime, Local, TimeDelta, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, Utc};
 use openwhoop_entities::packets;
 use openwhoop_db::{DatabaseHandler, SearchHistory};
 use openwhoop_codec::{
     Activity, HistoryReading, WhoopData, WhoopPacket,
-    constants::{CMD_FROM_STRAP, DATA_FROM_STRAP, MetadataType},
+    constants::{CMD_FROM_STRAP, CommandNumber, DATA_FROM_STRAP, EVENTS_FROM_STRAP, MetadataType},
 };
 
 use crate::{
@@ -14,6 +14,41 @@ use crate::{
     },
     types::activities,
 };
+
+/// Translate the u32 unix-seconds carried by event packets into the
+/// local-naive datetime the DB uses everywhere else.
+fn unix_to_local(unix: u32) -> anyhow::Result<NaiveDateTime> {
+    DateTime::from_timestamp(i64::from(unix), 0)
+        .map(|d| d.with_timezone(&Local).naive_local())
+        .ok_or_else(|| anyhow::anyhow!("unix timestamp {unix} out of range"))
+}
+
+/// Event-id → human name mapping (audit §3.2 of the BLE writeup).
+/// Unknown IDs fall through to the call site's `Unknown(N)` formatting.
+fn event_name(id: u8) -> &'static str {
+    match id {
+        3 => "BatteryLevel",
+        5 => "External5vOn",
+        6 => "External5vOff",
+        7 => "ChargingOn",
+        8 => "ChargingOff",
+        9 => "WristOn",
+        10 => "WristOff",
+        14 => "DoubleTap",
+        63 => "ExtendedBatteryInformation",
+        68 => "RunAlarm",
+        96 => "HighFreqSyncPrompt",
+        _ => match CommandNumber::from_u8(id) {
+            Some(CommandNumber::SendR10R11Realtime) => "SendR10R11Realtime",
+            Some(CommandNumber::ToggleRealtimeHr) => "ToggleRealtimeHr",
+            Some(CommandNumber::GetClock) => "GetClock",
+            Some(CommandNumber::RebootStrap) => "RebootStrap",
+            Some(CommandNumber::ToggleR7DataCollection) => "ToggleR7DataCollection",
+            Some(CommandNumber::ToggleGenericHrProfile) => "ToggleGenericHrProfile",
+            _ => "Unknown",
+        },
+    }
+}
 
 pub struct OpenWhoop {
     pub database: DatabaseHandler,
@@ -87,6 +122,18 @@ impl OpenWhoop {
 
                 data
             }
+            EVENTS_FROM_STRAP => {
+                // EVENTS_FROM_STRAP carries the same packet wire format as
+                // DATA/CMD but was previously dropped in this match. Routing
+                // it through the existing parser produces `WhoopData::Event`,
+                // `UnknownEvent`, or `RunAlarm`, which handle_data now writes
+                // to the events table.
+                let packet = WhoopPacket::from_data(packet.bytes)?;
+                let Ok(data) = WhoopData::from_packet(packet) else {
+                    return Ok(None);
+                };
+                data
+            }
             _ => return Ok(None),
         };
 
@@ -156,11 +203,56 @@ impl OpenWhoop {
             WhoopData::ConsoleLog { log, .. } => {
                 trace!(target: "ConsoleLog", "{}", log);
             }
-            WhoopData::RunAlarm { .. } => {}
-            WhoopData::AlarmInfo { .. } => {}
-            WhoopData::Event { .. } => {}
+            WhoopData::RunAlarm { unix } => {
+                let ts = unix_to_local(unix)?;
+                let _ = self
+                    .database
+                    .create_event(ts, 68, "RunAlarm", None)
+                    .await;
+                // Feature 3: mirror the fired alarm to alarm_history for
+                // easy querying alongside set/cleared lifecycle rows.
+                let _ = self
+                    .database
+                    .create_alarm_entry(
+                        openwhoop_db::AlarmAction::Fired,
+                        ts,
+                        Some(ts),
+                        Some(true),
+                    )
+                    .await;
+            }
+            WhoopData::AlarmInfo { enabled, unix } => {
+                let now = Local::now().naive_local();
+                let scheduled = unix_to_local(unix).ok();
+                let _ = self
+                    .database
+                    .create_alarm_entry(
+                        openwhoop_db::AlarmAction::Queried,
+                        now,
+                        scheduled,
+                        Some(enabled),
+                    )
+                    .await;
+            }
+            WhoopData::Event { unix, event } => {
+                let ts = unix_to_local(unix)?;
+                let id = event.as_u8() as i32;
+                let name = event_name(event.as_u8());
+                let _ = self.database.create_event(ts, id, name, None).await;
+            }
+            WhoopData::UnknownEvent { unix, event } => {
+                let ts = unix_to_local(unix)?;
+                let id = event as i32;
+                let name = format!("Unknown({})", event);
+                let _ = self.database.create_event(ts, id, &name, None).await;
+            }
             WhoopData::VersionInfo { harvard, boylston } => {
                 info!("version harvard {} boylston {}", harvard, boylston);
+                let now = Local::now().naive_local();
+                let _ = self
+                    .database
+                    .create_device_info(now, Some(harvard), Some(boylston), None)
+                    .await;
             }
             _ => {}
         }
@@ -314,6 +406,113 @@ impl OpenWhoop {
         Ok(())
     }
 
+    /// Feature 4: derive wear periods for the last 14 days from the
+    /// events table (WristOn/Off) + heart_rate.sensor_data skin_contact.
+    /// Idempotency: deletes existing wear_periods rows in the range
+    /// before inserting fresh. Safe to re-run.
+    pub async fn update_wear_periods(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::derive_wear_periods;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let events = self
+            .database
+            .get_wrist_events(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let runs = self
+            .database
+            .get_skin_contact_runs(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let periods = derive_wear_periods(&events, &runs, window_start, window_end);
+        info!("wear_periods: derived {} periods", periods.len());
+        for p in &periods {
+            if let Err(e) = self.database.create_wear_period(p).await {
+                log::warn!("failed to persist wear period: {e:#}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Feature 5: compute daytime HRV samples for each wear period in
+    /// the last 14 days, skipping windows that overlap sleep cycles.
+    pub async fn compute_daytime_hrv(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::compute_daytime_hrv;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let wear_periods = self
+            .database
+            .get_wear_periods_overlapping(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let sleep_cycles = self.database.get_sleep_cycles(Some(window_start)).await?;
+        let sleep_windows: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> =
+            sleep_cycles.iter().map(|c| (c.start, c.end)).collect();
+        let resting_hr = sleep_cycles
+            .last()
+            .map(|c| f64::from(c.min_bpm))
+            .unwrap_or(60.0);
+        let mut total = 0usize;
+        for wp in &wear_periods {
+            let readings = self
+                .database
+                .search_history(SearchHistory {
+                    from: Some(wp.start),
+                    to: Some(wp.end),
+                    limit: None,
+                })
+                .await?;
+            let samples = compute_daytime_hrv(wp.start, wp.end, &readings, &sleep_windows, resting_hr);
+            for s in &samples {
+                if let Err(e) = self.database.create_hrv_sample(s).await {
+                    log::warn!("failed to persist hrv sample: {e:#}");
+                }
+            }
+            total += samples.len();
+        }
+        info!("daytime hrv: {} samples across {} wear periods", total, wear_periods.len());
+        Ok(())
+    }
+
+    /// Feature 7: rule-v0 activity classification in 1-minute windows
+    /// across wear periods in the last 14 days, excluding sleep.
+    pub async fn classify_activities(&self) -> anyhow::Result<()> {
+        use openwhoop_algos::classify_activities;
+        let now = Local::now().naive_local();
+        let window_start = now - TimeDelta::days(14);
+        let window_end = now;
+        let wear_periods = self
+            .database
+            .get_wear_periods_overlapping(window_start, window_end)
+            .await
+            .unwrap_or_default();
+        let sleep_cycles = self.database.get_sleep_cycles(Some(window_start)).await?;
+        let sleep_windows: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> =
+            sleep_cycles.iter().map(|c| (c.start, c.end)).collect();
+        let mut total = 0usize;
+        for wp in &wear_periods {
+            let readings = self
+                .database
+                .search_history(SearchHistory {
+                    from: Some(wp.start),
+                    to: Some(wp.end),
+                    limit: None,
+                })
+                .await?;
+            let samples = classify_activities(wp.start, wp.end, &readings, &sleep_windows);
+            for s in &samples {
+                if let Err(e) = self.database.create_activity_sample(s).await {
+                    log::warn!("failed to persist activity sample: {e:#}");
+                }
+            }
+            total += samples.len();
+        }
+        info!("activity classification: {} samples across {} wear periods", total, wear_periods.len());
+        Ok(())
+    }
+
     pub async fn calculate_spo2(&self) -> anyhow::Result<()> {
         const BATCH: u64 = 86400;
         let window = SpO2Calculator::WINDOW_SIZE as i64;
@@ -464,5 +663,31 @@ fn map_sleep_cycle(sleep: openwhoop_entities::sleep_cycles::Model) -> SleepCycle
         score: sleep
             .score
             .unwrap_or_else(|| SleepCycle::sleep_score(sleep.start, sleep.end)),
+    }
+}
+
+#[cfg(test)]
+mod event_name_tests {
+    use super::event_name;
+
+    #[test]
+    fn known_event_ids_map_to_audit_names() {
+        assert_eq!(event_name(3), "BatteryLevel");
+        assert_eq!(event_name(5), "External5vOn");
+        assert_eq!(event_name(6), "External5vOff");
+        assert_eq!(event_name(7), "ChargingOn");
+        assert_eq!(event_name(8), "ChargingOff");
+        assert_eq!(event_name(9), "WristOn");
+        assert_eq!(event_name(10), "WristOff");
+        assert_eq!(event_name(14), "DoubleTap");
+        assert_eq!(event_name(63), "ExtendedBatteryInformation");
+        assert_eq!(event_name(68), "RunAlarm");
+        assert_eq!(event_name(96), "HighFreqSyncPrompt");
+    }
+
+    #[test]
+    fn unknown_event_id_returns_unknown_marker() {
+        assert_eq!(event_name(255), "Unknown");
+        assert_eq!(event_name(200), "Unknown");
     }
 }

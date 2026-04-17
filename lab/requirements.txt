@@ -1,0 +1,5 @@
+# openwhoop lab — dev dashboard deps
+# Python 3.10+ recommended. Install with: pip install -r lab/requirements.txt
+marimo>=0.9,<1.0
+pandas>=2.0
+plotly>=5.18

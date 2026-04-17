@@ -506,15 +506,15 @@ blow the budget, the first thing to batch is FFT planning (create one
 | Item | Where | Blocker |
 |---|---|---|
 | Personal-mean `BASE_NEED_HOURS` self-calibration (30-day) | `scoring.rs` §5.7 | No recovery score computed yet |
-| `prior_day_strain` wired into sleep need | `openwhoop/src/sleep_staging.rs::stage_one_cycle` | `StrainCalculator` exists but isn't invoked per-day |
-| `consistency_score` input | same | Fetch from `ConsistencyAnalyzer` per cycle |
-| `avg_sleep_stress` input | same | Aggregate Baevsky stress over sleep window |
+| ~~`prior_day_strain` wired into sleep need~~ | Done | `compute_prior_day_strain` runs `StrainCalculator` on 24 h prior |
+| ~~`consistency_score` input~~ | Done | `compute_consistency_score` runs `SleepConsistencyAnalyzer` on last 7 nights (≥3 nights required) |
+| ~~`avg_sleep_stress` input~~ | Done | `db.avg_stress_in_range` across sleep window |
+| Deep HR gate sensitivity to baseline semantics | `classifier.rs` Deep rule | `hr < baseline.resting_hr + 8` is near-tautological when `resting_hr` is defined as mean of nightly minimums. Three options: widen offset, redefine resting_hr (percentile vs min), or replace with within-night percentile. See 2026-04-17 session log. |
 | Skin-temp baseline absolute value | `db::get_recent_night_aggregates` | Currently stores only deviation; decide: store absolute too, or bootstrap from an initial absolute-value pass |
 | NeuroKit2 parity test fixtures | `notebooks/` | Requires offline Python run |
 | Respiratory-rate illness flag surfacing | UI layer | Function exists, not called |
 | Skin-temp deviation flag surfacing | UI layer | Same |
-| `approx_constant` clippy error in `helpers/time_math.rs:203` | pre-existing | Unrelated to staging; clean up when convenient |
-| `redundant_closure` warnings `db.rs:59,101` | pre-existing | Same |
+| ~~`approx_constant` / `redundant_closure` clippy warnings~~ | Done | `cargo clippy --workspace --all-targets` is now clean |
 | Phase 2: pretrained LightGBM via ONNX | new | See §13.3 |
 
 ## 15. Acceptance criteria from PRD §6
