@@ -115,13 +115,27 @@ pub const MOTION_WAKE_THRESHOLD: f64 = 20.0;
 /// classify Wake. Wulterkens 2021 uses a similar +15 BPM floor.
 pub const WAKE_HR_OFFSET_BPM: f64 = 15.0;
 
-/// HR ceiling (BPM above resting) for Deep classification. Deep sleep
-/// HR is typically within ~5-10 BPM of resting due to metabolic
-/// quiescence (Trinder et al. 2012). Set to +8 after empirically
-/// observing on real data that +5 excluded most candidate Deep
-/// epochs for users with a low resting HR (the nightly-minimum proxy
-/// for resting is itself a Deep-epoch value, so requiring other
-/// Deep epochs to be within 5 BPM of it is near-tautological).
+/// Within-night HR percentile below which Deep is considered (rule-v2).
+/// The ~25th percentile of the night's valid-epoch HR distribution
+/// puts an epoch in the "quietest quarter of this night" — the
+/// parasympathetic-floor region where SWS actually lives. Matches
+/// the per-night normalization convention used by Walch 2019
+/// (Apple Watch), Altini & Kinnunen 2021 (Oura), Roberts 2020,
+/// Sridhar 2020, and the HypnosPy ECDF-quantile approach
+/// (Perez-Pozuelo 2022). Tune after observing real-data distribution.
+pub const DEEP_HR_PERCENTILE: f64 = 0.25;
+
+/// Legacy absolute HR offset (rule-v1). Kept as a fallback for cases
+/// where the within-night HR distribution is unavailable (fewer than
+/// a handful of valid epochs). Treated as "HR < resting + offset";
+/// rule-v2's primary gate is the within-night percentile above.
+///
+/// Historical note: this was the primary Deep-HR gate in rule-v1
+/// (initially +5, bumped to +8 after early tuning). Replaced as
+/// primary on 2026-04-18 after research confirmed that anchoring
+/// Deep to a per-user baseline derived from nightly minimum HR is
+/// structurally tautological — the nightly minimum IS a Deep HR.
+/// See docs/DEEP_HR_RESEARCH_SYNTHESIS.md.
 pub const DEEP_HR_OFFSET_BPM: f64 = 8.0;
 
 /// Minimum stillness ratio for Deep. Deep sleep is the stillest stage

@@ -2,12 +2,17 @@
 //!
 //! Hierarchical decision rules over [`EpochFeatures`]. Thresholds are a
 //! mix of:
-//!   - *Absolute* values anchored on per-user baselines (resting HR,
-//!     sleep RMSSD median) — falling back to population defaults when
-//!     the user has <14 nights of data.
-//!   - *Relative* within-night percentiles of features that vary a lot
-//!     across individuals in absolute scale (HF power, LF/HF ratio, HR
-//!     std). Computed once per classification run.
+//!   - *Within-night percentiles* for features that vary a lot across
+//!     individuals in absolute scale (HF power, LF/HF ratio, HR std,
+//!     HR mean). Computed once per classification run. This is the
+//!     primary normalization strategy — matches published wrist/PPG
+//!     staging conventions (Walch 2019, Altini & Kinnunen 2021,
+//!     Roberts 2020, Sridhar 2020, Perez-Pozuelo 2022).
+//!   - *Absolute* values anchored on per-user baselines (resting HR
+//!     for the Wake +15 BPM rule, sleep RMSSD median) — with
+//!     population defaults as fallback. Used only where physiological
+//!     absolute scale carries meaning (wake arousal, parasympathetic
+//!     tone above the user's own sleep median).
 //!
 //! Post-processing order: rules → forbidden-transition fix-ups →
 //! min-duration merge → 3-epoch median filter.
@@ -15,14 +20,17 @@
 use chrono::NaiveDateTime;
 
 use super::constants::{
-    DEEP_HR_OFFSET_BPM, DEEP_MOTION_STILLNESS, HR_STD_PERCENTILE, LF_HF_PERCENTILE,
-    LIGHT_MOTION_STILLNESS, MOTION_WAKE_THRESHOLD, POPULATION_RESTING_HR,
+    DEEP_HR_OFFSET_BPM, DEEP_HR_PERCENTILE, DEEP_MOTION_STILLNESS, HR_STD_PERCENTILE,
+    LF_HF_PERCENTILE, LIGHT_MOTION_STILLNESS, MOTION_WAKE_THRESHOLD, POPULATION_RESTING_HR,
     POPULATION_SLEEP_RMSSD_MEDIAN, REL_NIGHT_DEEP_MAX, REL_NIGHT_REM_MIN, REM_MOTION_STILLNESS,
     SPECTRAL_HF_PERCENTILE, WAKE_HR_OFFSET_BPM,
 };
 use super::features::EpochFeatures;
 
-pub const CLASSIFIER_VERSION: &str = "rule-v1";
+/// Classifier version tag. Bumped when rule structure or thresholds
+/// change materially. `rule-v2` (2026-04-18): Deep HR gate moved from
+/// absolute `hr < resting + 8` to within-night `hr < 25th percentile`.
+pub const CLASSIFIER_VERSION: &str = "rule-v2";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SleepStage {
@@ -115,6 +123,11 @@ struct NightThresholds {
     hf_p75: Option<f64>,
     lfhf_p75: Option<f64>,
     hr_std_p60: Option<f64>,
+    /// Deep HR gate threshold (rule-v2): an epoch's `hr_mean` must be
+    /// below this value to clear the Deep HR check. `None` when the
+    /// night has too few valid HR values to compute a percentile —
+    /// caller falls back to the legacy absolute rule.
+    hr_p25: Option<f64>,
 }
 
 impl NightThresholds {
@@ -131,11 +144,16 @@ impl NightThresholds {
             .iter()
             .filter_map(|f| if f.is_valid { f.hr_std } else { None })
             .collect();
+        let hr_mean: Vec<f64> = features
+            .iter()
+            .filter_map(|f| if f.is_valid { f.hr_mean } else { None })
+            .collect();
 
         Self {
             hf_p75: percentile(&hf, SPECTRAL_HF_PERCENTILE),
             lfhf_p75: percentile(&lfhf, LF_HF_PERCENTILE),
             hr_std_p60: percentile(&hr_std, HR_STD_PERCENTILE),
+            hr_p25: percentile(&hr_mean, DEEP_HR_PERCENTILE),
         }
     }
 }
@@ -197,15 +215,27 @@ fn classify_one(
     //
     // Physiology: slow-wave sleep is marked by parasympathetic
     // dominance (high HF power, elevated RMSSD vs. the user's own
-    // sleep median) with a metabolic HR floor near resting and very
-    // little motion. Biased to the first half of the night where SWS
-    // actually lives (Carskadon & Dement, Principles and Practice of
-    // Sleep Medicine, 6e, ch. 2). Respiratory-rate regularity is a
-    // published Deep cue but `resp_rate_std` was too noisy on real
-    // data to use as a gate — see constants.rs note.
+    // sleep median) with a HR in the quietest portion of the night
+    // and very little motion. Biased to the first half of the night
+    // where SWS actually lives (Carskadon & Dement, Principles and
+    // Practice of Sleep Medicine, 6e, ch. 2).
+    //
+    // HR gate (rule-v2): within-night 25th percentile rather than
+    // absolute offset from baseline resting HR. The baseline
+    // `resting_hr` is derived from nightly-minimum HR, which is
+    // itself a Deep-sleep value — anchoring the Deep rule to it was
+    // near-tautological. Published wrist-staging classifiers
+    // (Walch 2019, Altini & Kinnunen 2021, Roberts 2020, Sridhar
+    // 2020) all normalize HR per-night instead. Falls back to the
+    // legacy absolute rule if the night has too few valid HR values
+    // to form a percentile.
+    let hr_ok = match th.hr_p25 {
+        Some(p25) => hr_mean < p25,
+        None => hr_mean < resting_hr + DEEP_HR_OFFSET_BPM,
+    };
     if let Some(hf_p75) = th.hf_p75
         && stillness > DEEP_MOTION_STILLNESS
-        && hr_mean < resting_hr + DEEP_HR_OFFSET_BPM
+        && hr_ok
         && hf > hf_p75
         && rmssd > rmssd_median
         && f.relative_night_position < REL_NIGHT_DEEP_MAX
@@ -381,13 +411,16 @@ mod tests {
         let baseline = UserBaseline::population_default();
         let stages = classify_epochs(&[f], &baseline);
         assert_eq!(stages[0].stage, SleepStage::Wake);
-        assert_eq!(stages[0].classifier_version, "rule-v1");
+        assert_eq!(stages[0].classifier_version, CLASSIFIER_VERSION);
     }
 
     #[test]
     fn low_motion_low_hr_high_hf_first_half_classifies_deep() {
-        // Need a set of features so within-night percentiles exist.
-        // Build 10 epochs: 1 high-HF target + 9 low-HF filler.
+        // Rule-v2: Deep requires hr_mean < 25th percentile of this
+        // night's HRs. Build 9 filler epochs at hr_mean=62 and a
+        // target at hr_mean=52 — the target will sit at the bottom
+        // of the distribution (p25 ~= 62, 52 < 62) while the fillers
+        // won't (62 not < 62).
         let baseline = UserBaseline {
             resting_hr: Some(60.0),
             sleep_rmssd_median: Some(40.0),
@@ -398,7 +431,7 @@ mod tests {
             let mut f = base_features(0.1 + i as f64 * 0.01);
             f.motion_stillness_ratio = Some(0.99);
             f.motion_activity_count = Some(1.0);
-            f.hr_mean = Some(58.0);
+            f.hr_mean = Some(62.0);
             f.hf_power = Some(100.0); // low-HF baseline
             f.rmssd = Some(30.0);
             f.resp_rate_std = Some(1.0);
@@ -407,7 +440,7 @@ mod tests {
         let mut target = base_features(0.2);
         target.motion_stillness_ratio = Some(0.99);
         target.motion_activity_count = Some(1.0);
-        target.hr_mean = Some(58.0);
+        target.hr_mean = Some(52.0); // below the within-night p25
         target.hf_power = Some(5000.0); // way above 75th percentile
         target.rmssd = Some(60.0); // above baseline median
         target.resp_rate_std = Some(1.0);
