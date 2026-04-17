@@ -1,5 +1,6 @@
 mod activity_samples;
 mod alarm_history;
+mod dev_notes;
 mod device_info;
 mod events;
 mod hrv_samples;
@@ -11,6 +12,7 @@ mod sync_log;
 mod temperature;
 mod wear_periods;
 pub use alarm_history::AlarmAction;
+pub use dev_notes::{DevNoteInput, DevNoteKind};
 pub use sleep_staging::StageCycleUpdate;
 pub use sync_log::{SyncCounts, SyncOutcome};
 pub use temperature::TempReading;

@@ -3,6 +3,7 @@
 pub use super::activities::Entity as Activities;
 pub use super::activity_samples::Entity as ActivitySamples;
 pub use super::alarm_history::Entity as AlarmHistory;
+pub use super::dev_notes::Entity as DevNotes;
 pub use super::device_info::Entity as DeviceInfo;
 pub use super::events::Entity as Events;
 pub use super::heart_rate::Entity as HeartRate;
