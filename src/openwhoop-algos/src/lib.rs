@@ -28,3 +28,6 @@ pub mod sleep_staging;
 
 pub(crate) mod wear_tracking;
 pub use wear_tracking::{WearEvent, WearPeriod, WearSource, SkinContactRun, derive_wear_periods};
+
+pub(crate) mod daytime_hrv;
+pub use daytime_hrv::{HrvContext, HrvSample, compute_daytime_hrv};

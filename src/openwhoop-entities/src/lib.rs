@@ -7,6 +7,7 @@ pub mod alarm_history;
 pub mod device_info;
 pub mod events;
 pub mod heart_rate;
+pub mod hrv_samples;
 pub mod packets;
 pub mod sleep_cycles;
 pub mod sleep_epochs;

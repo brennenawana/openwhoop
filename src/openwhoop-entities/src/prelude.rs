@@ -5,6 +5,7 @@ pub use super::alarm_history::Entity as AlarmHistory;
 pub use super::device_info::Entity as DeviceInfo;
 pub use super::events::Entity as Events;
 pub use super::heart_rate::Entity as HeartRate;
+pub use super::hrv_samples::Entity as HrvSamples;
 pub use super::packets::Entity as Packets;
 pub use super::sleep_cycles::Entity as SleepCycles;
 pub use super::sleep_epochs::Entity as SleepEpochs;

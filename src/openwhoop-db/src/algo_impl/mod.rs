@@ -1,6 +1,7 @@
 mod alarm_history;
 mod device_info;
 mod events;
+mod hrv_samples;
 mod sleep;
 mod sleep_staging;
 mod spo2;
