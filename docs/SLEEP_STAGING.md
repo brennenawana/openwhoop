@@ -193,7 +193,7 @@ individual absolute-scale variance.
 Rule order (first match wins):
 
 1. **Wake** — high motion + HR > resting+15 BPM
-2. **Deep** — very still (>0.95) + **HR < within-night 25th percentile** + HF > P50 + RMSSD > user sleep median + relative-night-position < 0.6
+2. **Deep** — very still (>0.95) + **HR < within-night 25th percentile** + HF > P50 + **RMSSD > within-night 50th percentile** + relative-night-position < 0.6
 3. **REM** — still (>0.85) + LF/HF > P50 + HR std > P50 + relative-night-position > 0.2
 4. **Light** — any remaining "sleep-ish" epoch with stillness > 0.7
 5. **Wake** — everything else
@@ -218,7 +218,21 @@ Three independent research passes (ChatGPT, Claude, Gemini Deep Research) conver
 
 Change: replace `hr_mean < baseline.resting_hr + 8` with `hr_mean < 25th percentile of this night's valid HRs`. Falls back to the legacy absolute rule when there are too few valid HRs to form a percentile. Bumped `CLASSIFIER_VERSION` to `"rule-v2"`.
 
-Outcome on the reference test night with personalized baseline: Deep climbed from 2.5% (rule-v1) to 4.4% (rule-v2). Performance score 63.1 → 63.6. The HR gate is no longer a bottleneck; the remaining limit is the conjunction with HF > P50 + RMSSD > baseline-median + first-60%-of-night. Further tuning of those gates is a separate ticket — the literature recommends them all stay relative; if Brennen's nightly RMSSD distribution sits below the population baseline median (47.4), the RMSSD gate may need to shift to a within-night percentile too.
+Outcome on the reference test night with personalized baseline: Deep climbed from 2.5% (rule-v1) to 4.4% (rule-v2 HR). Performance score 63.1 → 63.6.
+
+In the same commit family, the RMSSD gate also moved from `rmssd > baseline.sleep_rmssd_median` to `rmssd > within-night 50th percentile`. This was the second tautology — a baseline median computed across recent nights drifts above the current night's distribution for users whose RMSSD trends low. Same fallback-to-baseline pattern when no valid RMSSDs exist in the night.
+
+#### Structural limit of percentile-AND conjunction
+
+Empirically observed on real data: with all five Deep gates (stillness > 0.95, HR < p25, HF > p50, RMSSD > p50, rel_night < 0.6) the joint intersection on a 5h night was 13 epochs out of 541 valid (2.4%), matching the independent-probability product (0.7 × 0.25 × 0.5 × 0.5 × 0.62 = 2.7%). The gates **are not strongly correlated** for this user — the parasympathetic-cluster assumption (Deep epochs simultaneously low-HR, high-HF, high-RMSSD) doesn't hold tightly.
+
+Implication: rule-v2's structural Deep ceiling is roughly 3-5% per night for users whose features don't cluster strongly. Further tuning along the same axis (e.g., relax HF to p40) won't help much — the math is the limit, not the constants. The next-iteration directions:
+
+- **Soft-score Deep** — sum gate-scores rather than AND-conjunct them; threshold the total. Permits "almost-Deep" epochs that miss one gate to still classify Deep when the others are emphatic.
+- **Drop one feature gate** — RMSSD and HF carry overlapping parasympathetic information; using one as primary and the other as a corroborator (instead of both as hard ANDs) would loosen by ~30%.
+- **Phase 2 ML** — a learned classifier (LightGBM on MESA) inherently models the joint distribution and isn't bound by AND-conjunction limits.
+
+For now, accept rule-v2 as the right semantics for the foreseeable future. Don't chase Deep% by loosening individual constants; revisit when more data is in or when Phase 2 lands.
 
 Forward-compat note: rule-v2's per-night HR normalization aligns the on-device feature distribution with what MESA's bzhai pipeline produces (pooled `StandardScaler` per training subject) — Phase 2 LightGBM training fits to the same family of features.
 
