@@ -7,6 +7,7 @@
 //! that cycle `classifier_version = "failed"`, then continues.
 
 use chrono::{Local, NaiveDateTime, TimeDelta};
+use openwhoop_algos::SleepConsistencyAnalyzer;
 use openwhoop_algos::sleep_staging::{
     self, ArchitectureMetrics, CLASSIFIER_VERSION, EpochFeatures, EpochStage, NightSleep,
     PerformanceScore, RespiratoryStats, ScoringInputs, SleepNeedInputs, UserBaseline,
@@ -319,16 +320,16 @@ async fn stage_one_cycle(
 
     // 8. Performance score.
     let actual_sleep_hours = metrics.total_sleep_minutes / 60.0;
+    let consistency_score = compute_consistency_score(db, cycle.start).await?;
     let scoring = ScoringInputs {
         actual_sleep_hours,
         sleep_need_hours: need,
         sleep_efficiency: metrics.sleep_efficiency,
         deep_pct: metrics.deep_pct,
         rem_pct: metrics.rem_pct,
-        // Consistency + sleep stress inputs aren't wired yet in this
-        // pipeline. Neutral fallbacks keep the total well-defined
-        // until they're plumbed in.
-        consistency_score: None,
+        consistency_score,
+        // Sleep stress input isn't wired yet — Baevsky per-epoch stress
+        // aggregation still falls back to the neutral 5.0.
         avg_sleep_stress: None,
     };
     let perf: PerformanceScore = performance_score(&scoring);
@@ -373,6 +374,32 @@ async fn compute_skin_temp_deviation(
         (Some(n), Some(b)) => Ok(Some(n - b)),
         _ => {
             let _ = baseline; // referenced for future parameterization
+            Ok(None)
+        }
+    }
+}
+
+/// Compute a 0-100 sleep-consistency score for the current cycle by
+/// running [`SleepConsistencyAnalyzer`] over the past 7 nights
+/// (inclusive of the current cycle). Returns `None` when there are
+/// fewer than 3 nights of history — at that point the statistic is
+/// too noisy to mean anything and the classifier should fall back to
+/// the neutral constant.
+async fn compute_consistency_score(
+    db: &DatabaseHandler,
+    current_cycle_start: NaiveDateTime,
+) -> anyhow::Result<Option<f64>> {
+    const MIN_NIGHTS: usize = 3;
+    let window_start = current_cycle_start - TimeDelta::days(7);
+    let recent = db.get_sleep_cycles(Some(window_start)).await?;
+    if recent.len() < MIN_NIGHTS {
+        return Ok(None);
+    }
+    let analyzer = SleepConsistencyAnalyzer::new(recent);
+    match analyzer.calculate_consistency_metrics() {
+        Ok(metrics) => Ok(Some(metrics.score.total_score)),
+        Err(e) => {
+            log::warn!("consistency score computation failed: {e:#}");
             Ok(None)
         }
     }
