@@ -9,9 +9,8 @@ use openwhoop_codec::{
 
 use crate::{
     algo::{
-        ActivityPeriod, MAX_SLEEP_PAUSE, MAX_WORKOUT_DURATION, MIN_WORKOUT_DURATION,
-        SkinTempCalculator, SleepCycle, SpO2Calculator, StressCalculator,
-        helpers::format_hm::FormatHM,
+        ActivityPeriod, MAX_SLEEP_PAUSE, SkinTempCalculator, SleepCycle, SpO2Calculator,
+        StressCalculator, helpers::format_hm::FormatHM,
     },
     types::activities,
 };
@@ -264,44 +263,33 @@ impl OpenWhoop {
             let history = self.database.search_history(options).await?;
             let events = ActivityPeriod::detect_from_gravity(&history);
 
+            // NOTE: `detect_from_gravity` is a sleep/wake detector —
+            // it labels any non-still run as `Active`. That's not a
+            // workout. Previously we wrote every `Active` run as an
+            // `ActivityType::Activity` row, which the tray surfaces
+            // as "Workouts" — so a whole waking day between two
+            // sleep cycles became one 18h "workout" (false positive).
+            //
+            // Workouts are now derived from `activity_samples` via
+            // the rule-v0 classifier (`classify_activities`); this
+            // pass only records **Nap** events (short still runs
+            // during the waking day — a legitimate signal from the
+            // gravity detector).
             for event in events {
-                let activity = match event.activity {
-                    Activity::Active => activities::ActivityType::Activity,
-                    Activity::Sleep => activities::ActivityType::Nap,
-                    _ => continue,
-                };
-
-                let duration = event.end - event.start;
-
-                // The gravity classifier returns `Active` for any
-                // non-still period. A whole waking day between two
-                // sleep cycles can collapse into one 18h "Active"
-                // run — which surfaces in the UI as an 18h workout.
-                // Filter out runs outside the plausible workout band.
-                if matches!(activity, activities::ActivityType::Activity)
-                    && (duration < MIN_WORKOUT_DURATION
-                        || duration > MAX_WORKOUT_DURATION)
-                {
-                    debug!(
-                        "Skipping out-of-range Active period {} → {} ({}): outside [{}, {}]",
-                        event.start,
-                        event.end,
-                        duration.format_hm(),
-                        MIN_WORKOUT_DURATION.format_hm(),
-                        MAX_WORKOUT_DURATION.format_hm(),
-                    );
+                if !matches!(event.activity, Activity::Sleep) {
                     continue;
                 }
 
+                let duration = event.end - event.start;
                 let activity = activities::ActivityPeriod {
                     period_id: cycle_id,
                     from: event.start,
                     to: event.end,
-                    activity,
+                    activity: activities::ActivityType::Nap,
                 };
 
                 info!(
-                    "Detected activity period from: {} to: {}, duration: {}",
+                    "Detected nap from: {} to: {}, duration: {}",
                     activity.from,
                     activity.to,
                     duration.format_hm()
