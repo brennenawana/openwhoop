@@ -31,3 +31,8 @@ pub use wear_tracking::{WearEvent, WearPeriod, WearSource, SkinContactRun, deriv
 
 pub(crate) mod daytime_hrv;
 pub use daytime_hrv::{HrvContext, HrvSample, compute_daytime_hrv};
+
+pub(crate) mod activity_classifier;
+pub use activity_classifier::{
+    ACTIVITY_CLASSIFIER_VERSION, ActivityClass, ActivitySample, classify_activities,
+};

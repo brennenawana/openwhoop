@@ -1,3 +1,4 @@
+mod activity_samples;
 mod alarm_history;
 mod device_info;
 mod events;
