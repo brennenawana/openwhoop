@@ -28,7 +28,7 @@ pub struct StageResult {
 /// Snapshot of last night's sleep for the Tauri tray app. All fields
 /// derive from the persisted `sleep_cycles` row and its epochs — the
 /// front-end builds its own display struct from this payload.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SleepSnapshot {
     pub sleep_start: NaiveDateTime,
     pub sleep_end: NaiveDateTime,
@@ -48,7 +48,7 @@ pub struct SleepSnapshot {
     pub classifier_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
 pub struct SleepStageTotals {
     pub awake_min: f64,
     pub light_min: f64,
@@ -56,7 +56,7 @@ pub struct SleepStageTotals {
     pub rem_min: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HypnogramEntry {
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
@@ -66,7 +66,7 @@ pub struct HypnogramEntry {
 /// Re-derivable score component breakdown. Consistency and sleep
 /// stress aren't persisted, so they come back as `NEUTRAL_*` values
 /// (matching what the staging pipeline passed as fallbacks).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct ScoreComponentsBreakdown {
     pub sufficiency: f64,
     pub efficiency: f64,
