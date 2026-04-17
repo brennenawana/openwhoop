@@ -174,3 +174,70 @@ pub const POPULATION_RESTING_HR: f64 = 62.0;
 /// Population median sleep RMSSD (ms). Shaffer & Ginsberg 2017
 /// normative data: adult sleep RMSSD median ~40 ms.
 pub const POPULATION_SLEEP_RMSSD_MEDIAN: f64 = 40.0;
+
+// ---------- sleep need / debt / scoring ----------
+//
+// PRD §5.7–5.9. Every coefficient here is taken directly from the PRD
+// formulas. Centralized so a future config file can override them.
+
+/// Baseline population sleep need (hours). Replaced with the user's
+/// personal mean after 30 nights of data (PRD §5.7).
+pub const BASE_NEED_HOURS: f64 = 7.5;
+
+/// Strain adjustment coefficient: each unit of prior-day strain adds
+/// this many hours to tonight's need. At strain 21 (max) this is
+/// +1.05 h (PRD §5.7).
+pub const STRAIN_ADJ_COEF: f64 = 0.05;
+
+/// Sleep-debt adjustment coefficient: this fraction of the rolling
+/// 7-day debt is added to tonight's need (PRD §5.7).
+pub const DEBT_ADJ_COEF: f64 = 0.3;
+
+/// Cap on the debt adjustment (hours). Prevents one very bad week
+/// from setting an unachievable need (PRD §5.7).
+pub const DEBT_ADJ_CAP_HOURS: f64 = 2.0;
+
+/// Fraction of nap minutes credited toward sleep need. Naps
+/// half-count per PRD §5.7.
+pub const NAP_CREDIT_FRAC: f64 = 0.5;
+
+/// Sleep need is clamped to this range so a sensible target always
+/// exists regardless of inputs (PRD §5.7).
+pub const MIN_SLEEP_NEED_HOURS: f64 = 6.0;
+pub const MAX_SLEEP_NEED_HOURS: f64 = 10.0;
+
+/// Sleep-debt decay weights across the last 7 nights (most recent
+/// weighted highest). PRD §5.8.
+pub const DEBT_DECAY_WEIGHTS: [f64; 7] = [1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15];
+
+/// Target restorative (Deep + REM) percentage of time in bed.
+/// 45% is the healthy adult benchmark from Hirshkowitz et al. 2015
+/// National Sleep Foundation consensus (25% REM + 20% Deep target).
+pub const RESTORATIVE_TARGET_PCT: f64 = 45.0;
+
+/// Neutral fallback for missing consistency score (0–100). 50 is the
+/// midpoint — assumes "we don't know" rather than penalizing or
+/// rewarding.
+pub const NEUTRAL_CONSISTENCY: f64 = 50.0;
+
+/// Neutral fallback for missing sleep-stress score (0–10 Baevsky).
+/// 5 corresponds to a 50 sleep_stress sub-score after inversion.
+pub const NEUTRAL_SLEEP_STRESS: f64 = 5.0;
+
+pub struct ScoreWeights {
+    pub sufficiency: f64,
+    pub efficiency: f64,
+    pub restorative: f64,
+    pub consistency: f64,
+    pub sleep_stress: f64,
+}
+
+/// Component weights for the composite Sleep Performance Score. Sum
+/// to 1.0. PRD §5.9. Prioritizes duration (sufficiency) like WHOOP.
+pub const SCORE_WEIGHTS: ScoreWeights = ScoreWeights {
+    sufficiency: 0.35,
+    efficiency: 0.20,
+    restorative: 0.20,
+    consistency: 0.15,
+    sleep_stress: 0.10,
+};
