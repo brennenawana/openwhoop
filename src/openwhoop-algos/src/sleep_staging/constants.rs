@@ -187,6 +187,15 @@ pub const LIGHT_MOTION_STILLNESS: f64 = 0.7;
 /// captures the parasympathetic-dominant half of the night.
 pub const SPECTRAL_HF_PERCENTILE: f64 = 0.50;
 
+/// RMSSD percentile above which Deep is considered (rule-v2).
+/// Within-night median: Deep candidates are the epochs with higher-
+/// than-night-median vagal tone. Replaced the `rmssd > baseline.median`
+/// rule for the same reason the HR gate moved — baseline medians
+/// computed across multiple prior nights can sit above the current
+/// night's distribution (especially for users whose overall HRV is
+/// lower than the population default 47 ms), starving Deep.
+pub const RMSSD_DEEP_PERCENTILE: f64 = 0.50;
+
 /// LF/HF percentile above which REM is considered. Median cut
 /// captures sympathovagal-elevated epochs relative to this night's
 /// own distribution.
