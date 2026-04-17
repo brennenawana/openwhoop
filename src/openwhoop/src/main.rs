@@ -176,7 +176,7 @@ pub enum OpenWhoopCommand {
         from: String,
         #[arg(long)]
         to: Option<String>,
-        #[arg(long, default_value = "rule-v1")]
+        #[arg(long, default_value = "rule-v2")]
         classifier: String,
     },
     ///
@@ -495,9 +495,14 @@ impl OpenWhoopCli {
             classifier,
         } = &self.subcommand
         {
-            if classifier != "rule-v1" {
+            // Accept any rule-v* tag — the actual classifier always
+            // runs the version compiled into the binary. The CLI flag
+            // is mostly informational; we just refuse non-rule values
+            // (which would imply a future ML classifier we haven't
+            // built yet).
+            if !classifier.starts_with("rule-v") {
                 anyhow::bail!(
-                    "unknown classifier '{classifier}'; only 'rule-v1' is supported in phase 1"
+                    "unknown classifier '{classifier}'; only rule-v* tags are supported in phase 1"
                 );
             }
             let from_dt = parse_date_arg(from)?;
