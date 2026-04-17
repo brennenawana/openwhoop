@@ -635,3 +635,50 @@ f300aa0  (7/10)  user baselines updater
 8cd6522  (9/10)  reclassify-sleep CLI
 6b31dd3  (10/10) snapshot data hooks for tray
 ```
+
+---
+
+## Session log — 2026-04-18 (rule-v2 + investigations)
+
+Worked through three follow-ups flagged after the initial rule-v2 HR-percentile change. Recording here so the next session can pick up cold.
+
+### What shipped
+
+| Commit | What |
+|---|---|
+| `de59737` | feat(sleep-staging): rule-v2 — within-night HR percentile gate for Deep |
+| `925944e` | feat(quick-wins): allow any rule-v* tag in reclassify-sleep CLI |
+| `44a2483` | docs(sleep-staging): rule-v2 calibration history + updated rule sketch |
+| `fae2781` | feat(sleep-staging): rule-v2 — RMSSD Deep gate uses within-night median |
+| `365b4a9` | docs(sleep-staging): rule-v2 RMSSD gate + structural limit finding |
+| `23f9725` | docs(sleep-staging): cycle 2 wake fall-through finding |
+
+Also reclassified the live tray DB to rule-v2 (`reclassify-sleep --classifier=rule-v2 --from 2026-04-01`). Both branches (`master`, `integration/whoop-tray`) are pushed.
+
+### Follow-up status
+
+| # | Item | Status | Where to find it |
+|---|---|---|---|
+| 1 | Convert RMSSD Deep gate to within-night percentile | **Done** (`fae2781`) | §6 Calibration history → "rule-v2" |
+| 2 | Redefine `baseline.resting_hr` for strain/recovery | **Deferred** | DEEP_HR_RESEARCH_SYNTHESIS.md §"Defer". The strain calc just shipped; changing the meaning of `resting_hr` invalidates downstream values. Revisit when there's a reason to. |
+| 3 | Investigate cycle 2 (15% wake) | **Done — root cause identified, fix deferred** | §6 Calibration history → "Wake fall-through over-fires on restless Light" |
+
+### Two structural findings from this session
+
+Both findings point at the same conclusion: the rule-based classifier is at its useful ceiling on this user's data. Further constant tuning won't help.
+
+1. **Deep gate AND-conjunction ceiling.** Five Deep gates AND-conjuncted yield ~2.4% Deep on real data, matching the independent-probability product (0.7 × 0.25 × 0.5 × 0.5 × 0.62 = 2.7%). The gates are largely uncorrelated for this user — the parasympathetic-cluster assumption doesn't hold tightly. Three documented next directions: soft-score Deep, drop one redundant gate, Phase 2 ML.
+
+2. **Wake fall-through over-fires.** All 91 Wake epochs in cycle 2 fired Rule 5 fall-through (stillness ≤ 0.7) with zero hitting the explicit Rule 1 motion+HR gate. 84 sit in a single 35-min cluster with HR in the night's normal sleep range (60-67, mean 64). Proposed two-band fix (HR p75 confirmation in the 0.5-0.7 stillness band) deferred until ground-truth labels exist.
+
+### Stopping point
+
+Both classifier follow-ups end with the same recommendation: **stop tuning constants without a second source of truth.** Two nights of unlabeled data is not enough to discriminate "rule is wrong" from "user really had bad sleep on a hard mat."
+
+Three reasonable next directions when the project resumes:
+
+- **Accumulate more nights** — let the baseline mature toward the 14-night window, then re-evaluate the structural limit on a richer distribution. Cheapest option, just requires wearing the strap.
+- **Phase 2 ML scoping** (see §13.3) — pretrained LightGBM on MESA via ONNX. Inherently models the joint feature distribution and isn't bound by AND-conjunction limits. The on-device feature pipeline is already MESA-aligned (rule-v2's per-night HR normalization matches `bzhai`'s `StandardScaler`).
+- **Ground-truth source** — log a second wearable's stage labeling on the same nights (Apple Watch, Oura, etc.) for comparison. Without this, every classifier change is shooting in the dark.
+
+Open dev notes in the live tray DB at session end: #12 (RMSSD + structural ceiling), #13 (cycle 2 wake fall-through). Both unresolved by design — they're documentation, not action items.
