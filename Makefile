@@ -19,7 +19,7 @@ lab:
 		. lab/.venv/bin/activate && marimo edit lab/dashboard.py; \
 	else \
 		echo "First-time setup needed. Run:"; \
-		echo "  python -m venv lab/.venv"; \
+		echo "  python3 -m venv lab/.venv"; \
 		echo "  source lab/.venv/bin/activate"; \
 		echo "  pip install -r lab/requirements.txt"; \
 		echo "Then re-run: make lab"; \
@@ -27,7 +27,13 @@ lab:
 	fi
 
 lab-setup:
-	python -m venv lab/.venv
+	python3 -m venv lab/.venv
 	. lab/.venv/bin/activate && pip install -r lab/requirements.txt
 
-.PHONY: add-migration run-migrations test-report snoop-ble lab lab-setup
+# Write a dev note into the tray's live DB (what the lab dashboard reads).
+# Usage: make note ARGS='"Title" --kind status --feature dev_dashboard --body "..."'
+TRAY_DB := $(HOME)/Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite
+note:
+	DATABASE_URL="sqlite://$(TRAY_DB)?mode=rw" cargo run --quiet --bin openwhoop -- note $(ARGS)
+
+.PHONY: add-migration run-migrations test-report snoop-ble lab lab-setup note

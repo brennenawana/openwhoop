@@ -19,15 +19,10 @@ Marimo design constraints in this file:
 
 import marimo
 
-__generated_with = "0.14.0"
+__generated_with = "0.17.6"
 app = marimo.App(width="medium")
 
-
-# ---------------------------------------------------------------- cell 0
-# Setup: import marimo as `mo`, resolve DB path, expose a read-only
-# connection factory. Everything downstream depends on this cell.
-@app.cell
-def setup():
+with app.setup(hide_code=True):
     import marimo as mo
     import os
     import sqlite3
@@ -36,22 +31,21 @@ def setup():
     from pathlib import Path
 
     def resolve_db_path() -> str:
+        # Prefer the tray's live DB — that's where the daemon writes syncs.
         # Resolution order: OPENWHOOP_DB env → DATABASE_URL if sqlite://
-        # → repo's ./db.sqlite → tray's live DB → repo's ./db.sqlite.
+        # → tray's live DB → repo's ./db.sqlite (stale fallback).
         env = os.environ.get("OPENWHOOP_DB") or os.environ.get("DATABASE_URL", "")
         if env.startswith("sqlite://"):
             env = env.removeprefix("sqlite://").split("?", 1)[0]
         if env and Path(env).exists():
             return env
-        repo_db = Path(__file__).resolve().parent.parent / "db.sqlite"
-        if repo_db.exists():
-            return str(repo_db)
         tray_db = (
             Path.home()
             / "Library/Application Support/dev.brennen.openwhoop-tray/db.sqlite"
         )
         if tray_db.exists():
             return str(tray_db)
+        repo_db = Path(__file__).resolve().parent.parent / "db.sqlite"
         return str(repo_db)  # may not exist; panels render emptiness
 
     db_path = resolve_db_path()
@@ -63,29 +57,22 @@ def setup():
         c.row_factory = sqlite3.Row
         return c
 
-    return datetime, db_path, mo, open_ro, repo_root, subprocess
 
+@app.cell(hide_code=True)
+def header():
+    mo.md(f"""
+    # OpenWhoop Lab
 
-# ---------------------------------------------------------------- cell 1
-# Title / DB identity.
-@app.cell
-def header(db_path, mo):
-    mo.md(
-        f"""# OpenWhoop Lab
+    **DB:** `{db_path}`
 
-**DB:** `{db_path}`
-
-Live view of agent activity and the data behind it. Read-only.
-Write notes via `openwhoop note "Title"` from the CLI.
-"""
-    )
+    Live view of agent activity and the data behind it. Read-only.
+    Write notes via `openwhoop note "Title"` from the CLI.
+    """)
     return
 
 
-# ---------------------------------------------------------------- cell 2
-# Panel 1 — Agent inbox (unresolved dev_notes).
-@app.cell
-def inbox(mo, open_ro):
+@app.cell(hide_code=True)
+def inbox():
     inbox_icon = {
         "note": "📝",
         "question": "❓",
@@ -128,13 +115,13 @@ def inbox(mo, open_ro):
             _feature_badge = _inbox_r["related_feature"] or "—"
             _body = (_inbox_r["body_md"] or "").strip()
             _card = f"""
-**#{_inbox_r['id']}** {_icon} **{_inbox_r['title']}**
-<sub>{_inbox_r['created_at']} · author `{_inbox_r['author']}` · feature `{_feature_badge}` · commit {_commit_badge}</sub>
+    **#{_inbox_r['id']}** {_icon} **{_inbox_r['title']}**
+    <sub>{_inbox_r['created_at']} · author `{_inbox_r['author']}` · feature `{_feature_badge}` · commit {_commit_badge}</sub>
 
-{_body}
+    {_body}
 
----
-"""
+    ---
+    """
             inbox_cards.append(_card)
         inbox_panel = mo.md(
             f"### 📥 Agent inbox ({len(inbox_rows)} open)\n\n" + "".join(inbox_cards)
@@ -143,10 +130,8 @@ def inbox(mo, open_ro):
     return
 
 
-# ---------------------------------------------------------------- cell 3
-# Panel 2 — Latest sleep: hypnogram + stages + scalars.
 @app.cell
-def latest_sleep(datetime, mo, open_ro):
+def latest_sleep():
     import plotly.graph_objects as _sleep_go
 
     sleep_stage_color = {
@@ -257,23 +242,21 @@ def latest_sleep(datetime, mo, open_ro):
         )
 
         sleep_md = f"""
-### 🛌 Latest sleep — {sleep_cycle['sleep_id']}
+    ### 🛌 Latest sleep — {sleep_cycle['sleep_id']}
 
-- **Performance score:** **{_opt(sleep_cycle['performance_score'])}** / 100 (classifier `{sleep_cycle['classifier_version'] or '—'}`)
-- **Efficiency:** {_opt(sleep_cycle['sleep_efficiency'])}% · **Latency:** {_opt(sleep_cycle['sleep_latency_minutes'])} min · **WASO:** {_opt(sleep_cycle['waso_minutes'])} min
-- **Cycles:** {sleep_cycle['cycle_count'] if sleep_cycle['cycle_count'] is not None else '—'} · **Wake events:** {sleep_cycle['wake_event_count'] if sleep_cycle['wake_event_count'] is not None else '—'}
-- **Respiratory:** {_opt(sleep_cycle['avg_respiratory_rate'])} bpm · **Skin temp Δ:** {_opt(sleep_cycle['skin_temp_deviation_c'], '{:.2f}')} °C
-- **Sleep need:** {_opt(sleep_cycle['sleep_need_hours'])} h · **Debt:** {_opt(sleep_cycle['sleep_debt_hours'], '{:.2f}')} h
-"""
+    - **Performance score:** **{_opt(sleep_cycle['performance_score'])}** / 100 (classifier `{sleep_cycle['classifier_version'] or '—'}`)
+    - **Efficiency:** {_opt(sleep_cycle['sleep_efficiency'])}% · **Latency:** {_opt(sleep_cycle['sleep_latency_minutes'])} min · **WASO:** {_opt(sleep_cycle['waso_minutes'])} min
+    - **Cycles:** {sleep_cycle['cycle_count'] if sleep_cycle['cycle_count'] is not None else '—'} · **Wake events:** {sleep_cycle['wake_event_count'] if sleep_cycle['wake_event_count'] is not None else '—'}
+    - **Respiratory:** {_opt(sleep_cycle['avg_respiratory_rate'])} bpm · **Skin temp Δ:** {_opt(sleep_cycle['skin_temp_deviation_c'], '{:.2f}')} °C
+    - **Sleep need:** {_opt(sleep_cycle['sleep_need_hours'])} h · **Debt:** {_opt(sleep_cycle['sleep_debt_hours'], '{:.2f}')} h
+    """
         sleep_panel = mo.vstack([mo.md(sleep_md), stage_fig, hypno_fig])
     sleep_panel
     return
 
 
-# ---------------------------------------------------------------- cell 4
-# Panel 3 — 14-night trend (score, efficiency, Deep %, REM %).
 @app.cell
-def trend(mo, open_ro):
+def trend():
     import pandas as _trend_pd
     import plotly.graph_objects as _trend_go
 
@@ -358,10 +341,8 @@ def trend(mo, open_ro):
     return
 
 
-# ---------------------------------------------------------------- cell 5
-# Panel 4 — Sync log (last 10 attempts).
 @app.cell
-def sync_log_panel(mo, open_ro):
+def sync_log_panel():
     log_icon = {
         "success": "✅",
         "error": "❌",
@@ -415,10 +396,8 @@ def sync_log_panel(mo, open_ro):
     return
 
 
-# ---------------------------------------------------------------- cell 6
-# Panel 5 — Recent git commits.
 @app.cell
-def commit_timeline(mo, repo_root, subprocess):
+def commit_timeline():
     try:
         commits_out = subprocess.run(
             ["git", "log", "--oneline", "--decorate", "-20", "--no-color"],
@@ -437,20 +416,17 @@ def commit_timeline(mo, repo_root, subprocess):
     return
 
 
-# ---------------------------------------------------------------- cell 7
-# Footer.
-@app.cell
-def footer(mo):
-    mo.md(
-        """---
-<sub>
-Future panels (tier 2/3): threshold sliders, before/after diffs,
-events/alarm timeline, wear-time + activity rollup, HRV trend,
-in-dashboard note resolution. See
-`docs/DEV_DASHBOARD_CONCEPT.md` for the roadmap.
-</sub>
-"""
-    )
+@app.cell(hide_code=True)
+def footer():
+    mo.md("""
+    ---
+    <sub>
+    Future panels (tier 2/3): threshold sliders, before/after diffs,
+    events/alarm timeline, wear-time + activity rollup, HRV trend,
+    in-dashboard note resolution. See
+    `docs/DEV_DASHBOARD_CONCEPT.md` for the roadmap.
+    </sub>
+    """)
     return
 
 
