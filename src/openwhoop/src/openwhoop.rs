@@ -202,6 +202,11 @@ impl OpenWhoop {
             }
             WhoopData::VersionInfo { harvard, boylston } => {
                 info!("version harvard {} boylston {}", harvard, boylston);
+                let now = Local::now().naive_local();
+                let _ = self
+                    .database
+                    .create_device_info(now, Some(harvard), Some(boylston), None)
+                    .await;
             }
             _ => {}
         }

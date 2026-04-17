@@ -1,3 +1,4 @@
+mod device_info;
 mod events;
 mod sleep;
 mod sleep_staging;
