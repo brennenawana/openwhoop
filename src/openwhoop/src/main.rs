@@ -31,6 +31,8 @@ use tokio::time::sleep;
 use openwhoop::api;
 use openwhoop_codec::{WhoopPacket, constants::WHOOP_SERVICE};
 
+mod dashboard;
+
 #[cfg(target_os = "linux")]
 pub type DeviceId = BDAddr;
 
@@ -56,6 +58,10 @@ pub enum OpenWhoopCommand {
     /// Scan for Whoop devices
     ///
     Scan,
+    ///
+    /// Print a one-page dashboard summary of your local data
+    ///
+    Dashboard,
     ///
     /// Download history data from whoop devices
     ///
@@ -411,6 +417,11 @@ impl OpenWhoopCli {
             return download_firmware(email, password, device_name, maxim, nordic, output_dir).await;
         }
 
+        if let OpenWhoopCommand::Dashboard = &self.subcommand {
+            let db_handler = DatabaseHandler::new(self.database_url).await;
+            return dashboard::dashboard_command(&db_handler).await;
+        }
+
         if let OpenWhoopCommand::ReclassifySleep {
             from,
             to,
@@ -678,6 +689,9 @@ impl OpenWhoopCli {
             }
             OpenWhoopCommand::DownloadFirmware { .. } => {
                 unreachable!("handled before BLE/DB init")
+            }
+            OpenWhoopCommand::Dashboard => {
+                unreachable!("handled before BLE init")
             }
             OpenWhoopCommand::ReclassifySleep { .. } => {
                 unreachable!("handled before BLE init")
