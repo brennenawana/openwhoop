@@ -1,3 +1,4 @@
+mod events;
 mod sleep;
 mod sleep_staging;
 mod spo2;

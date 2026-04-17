@@ -1,10 +1,10 @@
 use btleplug::api::ValueNotification;
-use chrono::{DateTime, Local, TimeDelta};
+use chrono::{DateTime, Local, NaiveDateTime, TimeDelta};
 use openwhoop_entities::packets;
 use openwhoop_db::{DatabaseHandler, SearchHistory};
 use openwhoop_codec::{
     Activity, HistoryReading, WhoopData, WhoopPacket,
-    constants::{CMD_FROM_STRAP, DATA_FROM_STRAP, MetadataType},
+    constants::{CMD_FROM_STRAP, CommandNumber, DATA_FROM_STRAP, EVENTS_FROM_STRAP, MetadataType},
 };
 
 use crate::{
@@ -14,6 +14,41 @@ use crate::{
     },
     types::activities,
 };
+
+/// Translate the u32 unix-seconds carried by event packets into the
+/// local-naive datetime the DB uses everywhere else.
+fn unix_to_local(unix: u32) -> anyhow::Result<NaiveDateTime> {
+    DateTime::from_timestamp(i64::from(unix), 0)
+        .map(|d| d.with_timezone(&Local).naive_local())
+        .ok_or_else(|| anyhow::anyhow!("unix timestamp {unix} out of range"))
+}
+
+/// Event-id → human name mapping (audit §3.2 of the BLE writeup).
+/// Unknown IDs fall through to the call site's `Unknown(N)` formatting.
+fn event_name(id: u8) -> &'static str {
+    match id {
+        3 => "BatteryLevel",
+        5 => "External5vOn",
+        6 => "External5vOff",
+        7 => "ChargingOn",
+        8 => "ChargingOff",
+        9 => "WristOn",
+        10 => "WristOff",
+        14 => "DoubleTap",
+        63 => "ExtendedBatteryInformation",
+        68 => "RunAlarm",
+        96 => "HighFreqSyncPrompt",
+        _ => match CommandNumber::from_u8(id) {
+            Some(CommandNumber::SendR10R11Realtime) => "SendR10R11Realtime",
+            Some(CommandNumber::ToggleRealtimeHr) => "ToggleRealtimeHr",
+            Some(CommandNumber::GetClock) => "GetClock",
+            Some(CommandNumber::RebootStrap) => "RebootStrap",
+            Some(CommandNumber::ToggleR7DataCollection) => "ToggleR7DataCollection",
+            Some(CommandNumber::ToggleGenericHrProfile) => "ToggleGenericHrProfile",
+            _ => "Unknown",
+        },
+    }
+}
 
 pub struct OpenWhoop {
     pub database: DatabaseHandler,
@@ -85,6 +120,18 @@ impl OpenWhoop {
 
                 data
             }
+            EVENTS_FROM_STRAP => {
+                // EVENTS_FROM_STRAP carries the same packet wire format as
+                // DATA/CMD but was previously dropped in this match. Routing
+                // it through the existing parser produces `WhoopData::Event`,
+                // `UnknownEvent`, or `RunAlarm`, which handle_data now writes
+                // to the events table.
+                let packet = WhoopPacket::from_data(packet.bytes)?;
+                let Ok(data) = WhoopData::from_packet(packet) else {
+                    return Ok(None);
+                };
+                data
+            }
             _ => return Ok(None),
         };
 
@@ -133,9 +180,26 @@ impl OpenWhoop {
             WhoopData::ConsoleLog { log, .. } => {
                 trace!(target: "ConsoleLog", "{}", log);
             }
-            WhoopData::RunAlarm { .. } => {}
+            WhoopData::RunAlarm { unix } => {
+                let ts = unix_to_local(unix)?;
+                let _ = self
+                    .database
+                    .create_event(ts, 68, "RunAlarm", None)
+                    .await;
+            }
             WhoopData::AlarmInfo { .. } => {}
-            WhoopData::Event { .. } => {}
+            WhoopData::Event { unix, event } => {
+                let ts = unix_to_local(unix)?;
+                let id = event.as_u8() as i32;
+                let name = event_name(event.as_u8());
+                let _ = self.database.create_event(ts, id, name, None).await;
+            }
+            WhoopData::UnknownEvent { unix, event } => {
+                let ts = unix_to_local(unix)?;
+                let id = event as i32;
+                let name = format!("Unknown({})", event);
+                let _ = self.database.create_event(ts, id, &name, None).await;
+            }
             WhoopData::VersionInfo { harvard, boylston } => {
                 info!("version harvard {} boylston {}", harvard, boylston);
             }
@@ -369,6 +433,32 @@ impl OpenWhoop {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod event_name_tests {
+    use super::event_name;
+
+    #[test]
+    fn known_event_ids_map_to_audit_names() {
+        assert_eq!(event_name(3), "BatteryLevel");
+        assert_eq!(event_name(5), "External5vOn");
+        assert_eq!(event_name(6), "External5vOff");
+        assert_eq!(event_name(7), "ChargingOn");
+        assert_eq!(event_name(8), "ChargingOff");
+        assert_eq!(event_name(9), "WristOn");
+        assert_eq!(event_name(10), "WristOff");
+        assert_eq!(event_name(14), "DoubleTap");
+        assert_eq!(event_name(63), "ExtendedBatteryInformation");
+        assert_eq!(event_name(68), "RunAlarm");
+        assert_eq!(event_name(96), "HighFreqSyncPrompt");
+    }
+
+    #[test]
+    fn unknown_event_id_returns_unknown_marker() {
+        assert_eq!(event_name(255), "Unknown");
+        assert_eq!(event_name(200), "Unknown");
     }
 }
 

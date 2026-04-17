@@ -13,6 +13,7 @@ mod m20250602_000000_sensor_data;
 mod m20250602_000001_spo2;
 mod m20250603_000000_skin_temp;
 pub mod m20260416_000000_sleep_staging;
+mod m20260417_000000_events;
 
 pub struct Migrator;
 
@@ -33,6 +34,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250602_000001_spo2::Migration),
             Box::new(m20250603_000000_skin_temp::Migration),
             Box::new(m20260416_000000_sleep_staging::Migration),
+            Box::new(m20260417_000000_events::Migration),
         ]
     }
 }
