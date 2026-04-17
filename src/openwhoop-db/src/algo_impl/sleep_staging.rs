@@ -313,6 +313,32 @@ impl DatabaseHandler {
         Ok(out)
     }
 
+    /// Average of `heart_rate.stress` (Baevsky 0-10) across the time
+    /// range. Returns `None` when no rows in the range have a stress
+    /// value (e.g. before `calculate-stress` has been run). Used by
+    /// the staging pipeline's performance-score input.
+    pub async fn avg_stress_in_range(
+        &self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    ) -> anyhow::Result<Option<f64>> {
+        let rows: Vec<Option<f64>> = heart_rate::Entity::find()
+            .filter(heart_rate::Column::Time.gte(start))
+            .filter(heart_rate::Column::Time.lte(end))
+            .filter(heart_rate::Column::Stress.is_not_null())
+            .select_only()
+            .column(heart_rate::Column::Stress)
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        let values: Vec<f64> = rows.into_iter().flatten().collect();
+        if values.is_empty() {
+            return Ok(None);
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        Ok(Some(mean))
+    }
+
     /// Most-recent sleep cycle along with its epoch rows. Used by the
     /// Tauri tray app to build a snapshot of last night's sleep.
     pub async fn get_latest_sleep_with_epochs(

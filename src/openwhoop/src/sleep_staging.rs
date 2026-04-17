@@ -321,6 +321,13 @@ async fn stage_one_cycle(
     // 8. Performance score.
     let actual_sleep_hours = metrics.total_sleep_minutes / 60.0;
     let consistency_score = compute_consistency_score(db, cycle.start).await?;
+    // Baevsky sleep-stress average across the sleep window. None when
+    // calculate-stress hasn't run yet for this window — falls back to
+    // the neutral 5.0 in the performance score.
+    let avg_sleep_stress = db
+        .avg_stress_in_range(cycle.start, cycle.end)
+        .await
+        .unwrap_or(None);
     let scoring = ScoringInputs {
         actual_sleep_hours,
         sleep_need_hours: need,
@@ -328,9 +335,7 @@ async fn stage_one_cycle(
         deep_pct: metrics.deep_pct,
         rem_pct: metrics.rem_pct,
         consistency_score,
-        // Sleep stress input isn't wired yet — Baevsky per-epoch stress
-        // aggregation still falls back to the neutral 5.0.
-        avg_sleep_stress: None,
+        avg_sleep_stress,
     };
     let perf: PerformanceScore = performance_score(&scoring);
 
