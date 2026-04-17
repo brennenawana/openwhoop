@@ -56,7 +56,7 @@ impl DatabaseHandler {
         let sensor_json = reading
             .sensor_data
             .as_ref()
-            .map(|s| serde_json::to_value(s))
+            .map(serde_json::to_value)
             .transpose()?;
 
         let packet = openwhoop_entities::heart_rate::ActiveModel {
@@ -98,7 +98,7 @@ impl DatabaseHandler {
                 let sensor_json = r
                     .sensor_data
                     .as_ref()
-                    .map(|s| serde_json::to_value(s))
+                    .map(serde_json::to_value)
                     .transpose()?;
                 Ok(openwhoop_entities::heart_rate::ActiveModel {
                     id: NotSet,

@@ -13,9 +13,11 @@ use std::{
 
 use anyhow::anyhow;
 use btleplug::{
-    api::{BDAddr, Central, Manager as _, Peripheral as _, ScanFilter},
+    api::{Central, Manager as _, Peripheral as _, ScanFilter},
     platform::{Adapter, Manager, Peripheral},
 };
+#[cfg(target_os = "linux")]
+use btleplug::api::BDAddr;
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeDelta, Utc};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -700,6 +702,7 @@ impl OpenWhoopCli {
         Self::default_adapter(&manager).await
     }
 
+    #[cfg(target_os = "linux")]
     async fn adapter_from_name(manager: &Manager, interface: &str) -> anyhow::Result<Adapter> {
         let adapters = manager.adapters().await?;
         let mut c_adapter = Err(anyhow!("Adapter: `{}` not found", interface));

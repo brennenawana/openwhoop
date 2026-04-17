@@ -200,7 +200,9 @@ mod tests {
 
     #[test]
     fn round_float_basic() {
-        assert_eq!(round_float(3.14159), 3.14);
+        // Hand-picked float values. Avoid PI/E-like literals to keep
+        // clippy's approx_constant lint off our back.
+        assert_eq!(round_float(1.23456), 1.23);
         assert_eq!(round_float(1.999), 2.0);
         assert_eq!(round_float(0.0), 0.0);
     }

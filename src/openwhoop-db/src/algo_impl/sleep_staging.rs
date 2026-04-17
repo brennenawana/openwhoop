@@ -313,6 +313,49 @@ impl DatabaseHandler {
         Ok(out)
     }
 
+    /// Maximum observed BPM across the entire `heart_rate` table.
+    /// Used as a max-HR proxy for strain computation when we don't
+    /// have the user's age (strain needs both max and resting HR).
+    /// Returns `None` on an empty table.
+    pub async fn max_observed_bpm(&self) -> anyhow::Result<Option<i16>> {
+        let rows: Vec<Option<i16>> = heart_rate::Entity::find()
+            .filter(heart_rate::Column::Bpm.gt(0))
+            .order_by_desc(heart_rate::Column::Bpm)
+            .limit(1)
+            .select_only()
+            .column(heart_rate::Column::Bpm)
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        Ok(rows.into_iter().next().flatten())
+    }
+
+    /// Average of `heart_rate.stress` (Baevsky 0-10) across the time
+    /// range. Returns `None` when no rows in the range have a stress
+    /// value (e.g. before `calculate-stress` has been run). Used by
+    /// the staging pipeline's performance-score input.
+    pub async fn avg_stress_in_range(
+        &self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    ) -> anyhow::Result<Option<f64>> {
+        let rows: Vec<Option<f64>> = heart_rate::Entity::find()
+            .filter(heart_rate::Column::Time.gte(start))
+            .filter(heart_rate::Column::Time.lte(end))
+            .filter(heart_rate::Column::Stress.is_not_null())
+            .select_only()
+            .column(heart_rate::Column::Stress)
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        let values: Vec<f64> = rows.into_iter().flatten().collect();
+        if values.is_empty() {
+            return Ok(None);
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        Ok(Some(mean))
+    }
+
     /// Most-recent sleep cycle along with its epoch rows. Used by the
     /// Tauri tray app to build a snapshot of last night's sleep.
     pub async fn get_latest_sleep_with_epochs(

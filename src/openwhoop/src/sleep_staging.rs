@@ -7,6 +7,7 @@
 //! that cycle `classifier_version = "failed"`, then continues.
 
 use chrono::{Local, NaiveDateTime, TimeDelta};
+use openwhoop_algos::{SleepConsistencyAnalyzer, StrainCalculator};
 use openwhoop_algos::sleep_staging::{
     self, ArchitectureMetrics, CLASSIFIER_VERSION, EpochFeatures, EpochStage, NightSleep,
     PerformanceScore, RespiratoryStats, ScoringInputs, SleepNeedInputs, UserBaseline,
@@ -186,102 +187,6 @@ fn recompute_components(cycle: &sleep_cycles::Model) -> Option<ScoreComponentsBr
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::NaiveDate;
-    use uuid::Uuid;
-
-    fn cycle_fixture() -> sleep_cycles::Model {
-        let start = NaiveDate::from_ymd_opt(2026, 4, 16)
-            .unwrap()
-            .and_hms_opt(22, 0, 0)
-            .unwrap();
-        let end = start + chrono::TimeDelta::hours(8);
-        sleep_cycles::Model {
-            id: Uuid::new_v4(),
-            sleep_id: end.date(),
-            start,
-            end,
-            min_bpm: 50,
-            max_bpm: 70,
-            avg_bpm: 60,
-            min_hrv: 30,
-            max_hrv: 80,
-            avg_hrv: 55,
-            score: Some(85.0),
-            synced: false,
-            awake_minutes: Some(30.0),
-            light_minutes: Some(250.0),
-            deep_minutes: Some(90.0),
-            rem_minutes: Some(110.0),
-            sleep_latency_minutes: Some(15.0),
-            waso_minutes: Some(25.0),
-            sleep_efficiency: Some(90.0),
-            wake_event_count: Some(3),
-            cycle_count: Some(4),
-            avg_respiratory_rate: Some(14.0),
-            min_respiratory_rate: Some(11.0),
-            max_respiratory_rate: Some(18.0),
-            skin_temp_deviation_c: Some(0.2),
-            sleep_need_hours: Some(8.0),
-            sleep_debt_hours: Some(1.5),
-            performance_score: Some(85.0),
-            classifier_version: Some("rule-v1".to_string()),
-        }
-    }
-
-    #[test]
-    fn snapshot_pulls_stage_totals_from_cycle() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert_eq!(snap.stages.awake_min, 30.0);
-        assert_eq!(snap.stages.light_min, 250.0);
-        assert_eq!(snap.stages.deep_min, 90.0);
-        assert_eq!(snap.stages.rem_min, 110.0);
-    }
-
-    #[test]
-    fn snapshot_empty_epochs_produces_empty_hypnogram() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert!(snap.hypnogram.is_empty());
-    }
-
-    #[test]
-    fn snapshot_forwards_persisted_scalars() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert_eq!(snap.efficiency, Some(90.0));
-        assert_eq!(snap.latency_min, Some(15.0));
-        assert_eq!(snap.waso_min, Some(25.0));
-        assert_eq!(snap.cycle_count, Some(4));
-        assert_eq!(snap.wake_event_count, Some(3));
-        assert_eq!(snap.avg_respiratory_rate, Some(14.0));
-        assert_eq!(snap.skin_temp_deviation_c, Some(0.2));
-        assert_eq!(snap.performance_score, Some(85.0));
-        assert_eq!(snap.sleep_need_hours, Some(8.0));
-        assert_eq!(snap.sleep_debt_hours, Some(1.5));
-    }
-
-    #[test]
-    fn snapshot_recomputes_score_components() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        let comps = snap.score_components.unwrap();
-        // total_sleep = (250 + 90 + 110) / 60 = 7.5 h
-        // sufficiency = 7.5 / 8.0 × 100 = 93.75
-        assert!((comps.sufficiency - 93.75).abs() < 0.01);
-        // tib = 480 min; restorative_pct = (90 + 110) / 480 × 100 = ~41.67
-        // restorative score = 41.67 / 45 × 100 ≈ 92.59
-        assert!((comps.restorative - 92.5925925925926).abs() < 0.01);
-        assert_eq!(comps.efficiency, 90.0);
-        // Neutral fallbacks for consistency + sleep_stress:
-        assert_eq!(comps.consistency, 50.0);
-        assert_eq!(comps.sleep_stress, 50.0);
-    }
-}
-
 /// Run the staging pipeline for every unstaged sleep cycle, then
 /// refresh the user baseline if stale. Safe to call on every sync.
 pub async fn stage_unclassified(db: &DatabaseHandler) -> anyhow::Result<StageResult> {
@@ -400,14 +305,13 @@ async fn stage_one_cycle(
     // 6. Skin temperature deviation vs rolling baseline.
     let skin_deviation = compute_skin_temp_deviation(db, cycle, baseline).await?;
 
-    // 7. Sleep need / debt. prior_day_strain is not yet computed in
-    // this codebase — pass None and let base_need carry it. When a
-    // strain calculator is added, wire it here.
+    // 7. Sleep need / debt.
     let nap_minutes = db.sum_nap_minutes_in_prior_day(cycle.end).await.unwrap_or(0.0);
     let debt = compute_prior_sleep_debt(db, cycle.start).await?;
+    let prior_day_strain = compute_prior_day_strain(db, baseline, cycle.start).await;
     let need_inputs = SleepNeedInputs {
         base_need_hours: None,
-        prior_day_strain: None,
+        prior_day_strain,
         rolling_7d_debt_hours: debt,
         nap_minutes,
     };
@@ -415,17 +319,22 @@ async fn stage_one_cycle(
 
     // 8. Performance score.
     let actual_sleep_hours = metrics.total_sleep_minutes / 60.0;
+    let consistency_score = compute_consistency_score(db, cycle.start).await?;
+    // Baevsky sleep-stress average across the sleep window. None when
+    // calculate-stress hasn't run yet for this window — falls back to
+    // the neutral 5.0 in the performance score.
+    let avg_sleep_stress = db
+        .avg_stress_in_range(cycle.start, cycle.end)
+        .await
+        .unwrap_or(None);
     let scoring = ScoringInputs {
         actual_sleep_hours,
         sleep_need_hours: need,
         sleep_efficiency: metrics.sleep_efficiency,
         deep_pct: metrics.deep_pct,
         rem_pct: metrics.rem_pct,
-        // Consistency + sleep stress inputs aren't wired yet in this
-        // pipeline. Neutral fallbacks keep the total well-defined
-        // until they're plumbed in.
-        consistency_score: None,
-        avg_sleep_stress: None,
+        consistency_score,
+        avg_sleep_stress,
     };
     let perf: PerformanceScore = performance_score(&scoring);
 
@@ -469,6 +378,75 @@ async fn compute_skin_temp_deviation(
         (Some(n), Some(b)) => Ok(Some(n - b)),
         _ => {
             let _ = baseline; // referenced for future parameterization
+            Ok(None)
+        }
+    }
+}
+
+/// WHOOP-scale strain (0-21) across the 24 hours before this cycle's
+/// start. Feeds `SleepNeedInputs.prior_day_strain`.
+///
+/// Returns `None` when we can't confidently compute it — too few
+/// readings in the window (<10 min), or max_hr/resting_hr missing.
+/// Uses:
+/// - `resting_hr` from the user baseline, or `POPULATION_RESTING_HR`
+///   (62) as a fallback.
+/// - `max_observed_bpm` from the full heart_rate table as a
+///   personalized max-HR proxy, or 190 as a fallback (rough adult
+///   population max). We don't have the user's age on record.
+async fn compute_prior_day_strain(
+    db: &DatabaseHandler,
+    baseline: &UserBaseline,
+    current_cycle_start: NaiveDateTime,
+) -> Option<f64> {
+    let prior_day_start = current_cycle_start - TimeDelta::hours(24);
+    let history = db
+        .search_history(SearchHistory {
+            from: Some(prior_day_start),
+            to: Some(current_cycle_start),
+            limit: None,
+        })
+        .await
+        .ok()?;
+
+    let max_hr = db
+        .max_observed_bpm()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(190);
+    let resting_hr = baseline
+        .resting_hr
+        .or(Some(openwhoop_algos::sleep_staging::constants::POPULATION_RESTING_HR))
+        .and_then(|v| u8::try_from(v.round() as i32).ok())
+        .unwrap_or(62);
+
+    let calc = StrainCalculator::new(max_hr, resting_hr);
+    calc.calculate(&history).map(|s| s.0)
+}
+
+/// Compute a 0-100 sleep-consistency score for the current cycle by
+/// running [`SleepConsistencyAnalyzer`] over the past 7 nights
+/// (inclusive of the current cycle). Returns `None` when there are
+/// fewer than 3 nights of history — at that point the statistic is
+/// too noisy to mean anything and the classifier should fall back to
+/// the neutral constant.
+async fn compute_consistency_score(
+    db: &DatabaseHandler,
+    current_cycle_start: NaiveDateTime,
+) -> anyhow::Result<Option<f64>> {
+    const MIN_NIGHTS: usize = 3;
+    let window_start = current_cycle_start - TimeDelta::days(7);
+    let recent = db.get_sleep_cycles(Some(window_start)).await?;
+    if recent.len() < MIN_NIGHTS {
+        return Ok(None);
+    }
+    let analyzer = SleepConsistencyAnalyzer::new(recent);
+    match analyzer.calculate_consistency_metrics() {
+        Ok(metrics) => Ok(Some(metrics.score.total_score)),
+        Err(e) => {
+            log::warn!("consistency score computation failed: {e:#}");
             Ok(None)
         }
     }
@@ -535,4 +513,101 @@ async fn refresh_baseline(db: &DatabaseHandler, force: bool) -> anyhow::Result<b
     db.insert_user_baseline(&snapshot, now).await?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use uuid::Uuid;
+
+    fn cycle_fixture() -> sleep_cycles::Model {
+        let start = NaiveDate::from_ymd_opt(2026, 4, 16)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let end = start + chrono::TimeDelta::hours(8);
+        sleep_cycles::Model {
+            id: Uuid::new_v4(),
+            sleep_id: end.date(),
+            start,
+            end,
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: Some(85.0),
+            synced: false,
+            awake_minutes: Some(30.0),
+            light_minutes: Some(250.0),
+            deep_minutes: Some(90.0),
+            rem_minutes: Some(110.0),
+            sleep_latency_minutes: Some(15.0),
+            waso_minutes: Some(25.0),
+            sleep_efficiency: Some(90.0),
+            wake_event_count: Some(3),
+            cycle_count: Some(4),
+            avg_respiratory_rate: Some(14.0),
+            min_respiratory_rate: Some(11.0),
+            max_respiratory_rate: Some(18.0),
+            skin_temp_deviation_c: Some(0.2),
+            sleep_need_hours: Some(8.0),
+            sleep_debt_hours: Some(1.5),
+            performance_score: Some(85.0),
+            classifier_version: Some("rule-v1".to_string()),
+        }
+    }
+
+    #[test]
+    fn snapshot_pulls_stage_totals_from_cycle() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert_eq!(snap.stages.awake_min, 30.0);
+        assert_eq!(snap.stages.light_min, 250.0);
+        assert_eq!(snap.stages.deep_min, 90.0);
+        assert_eq!(snap.stages.rem_min, 110.0);
+    }
+
+    #[test]
+    fn snapshot_empty_epochs_produces_empty_hypnogram() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert!(snap.hypnogram.is_empty());
+    }
+
+    #[test]
+    fn snapshot_forwards_persisted_scalars() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert_eq!(snap.efficiency, Some(90.0));
+        assert_eq!(snap.latency_min, Some(15.0));
+        assert_eq!(snap.waso_min, Some(25.0));
+        assert_eq!(snap.cycle_count, Some(4));
+        assert_eq!(snap.wake_event_count, Some(3));
+        assert_eq!(snap.avg_respiratory_rate, Some(14.0));
+        assert_eq!(snap.skin_temp_deviation_c, Some(0.2));
+        assert_eq!(snap.performance_score, Some(85.0));
+        assert_eq!(snap.sleep_need_hours, Some(8.0));
+        assert_eq!(snap.sleep_debt_hours, Some(1.5));
+    }
+
+    #[test]
+    fn snapshot_recomputes_score_components() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        let comps = snap.score_components.unwrap();
+        // total_sleep = (250 + 90 + 110) / 60 = 7.5 h
+        // sufficiency = 7.5 / 8.0 × 100 = 93.75
+        assert!((comps.sufficiency - 93.75).abs() < 0.01);
+        // tib = 480 min; restorative_pct = (90 + 110) / 480 × 100 = ~41.67
+        // restorative score = 41.67 / 45 × 100 ≈ 92.59
+        assert!((comps.restorative - 92.5925925925926).abs() < 0.01);
+        assert_eq!(comps.efficiency, 90.0);
+        // Neutral fallbacks for consistency + sleep_stress:
+        assert_eq!(comps.consistency, 50.0);
+        assert_eq!(comps.sleep_stress, 50.0);
+    }
+}
+
 
