@@ -9,5 +9,6 @@ pub use super::hrv_samples::Entity as HrvSamples;
 pub use super::packets::Entity as Packets;
 pub use super::sleep_cycles::Entity as SleepCycles;
 pub use super::sleep_epochs::Entity as SleepEpochs;
+pub use super::sync_log::Entity as SyncLog;
 pub use super::user_baselines::Entity as UserBaselines;
 pub use super::wear_periods::Entity as WearPeriods;

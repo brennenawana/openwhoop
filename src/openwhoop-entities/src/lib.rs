@@ -11,5 +11,6 @@ pub mod hrv_samples;
 pub mod packets;
 pub mod sleep_cycles;
 pub mod sleep_epochs;
+pub mod sync_log;
 pub mod user_baselines;
 pub mod wear_periods;

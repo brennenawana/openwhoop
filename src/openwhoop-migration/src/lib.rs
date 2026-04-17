@@ -18,6 +18,7 @@ mod m20260417_010000_device_info;
 mod m20260417_020000_alarm_history;
 mod m20260417_030000_wear_periods;
 mod m20260417_040000_hrv_samples;
+mod m20260417_050000_sync_log;
 
 pub struct Migrator;
 
@@ -43,6 +44,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260417_020000_alarm_history::Migration),
             Box::new(m20260417_030000_wear_periods::Migration),
             Box::new(m20260417_040000_hrv_samples::Migration),
+            Box::new(m20260417_050000_sync_log::Migration),
         ]
     }
 }
