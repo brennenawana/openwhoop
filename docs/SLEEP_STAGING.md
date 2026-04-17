@@ -193,7 +193,7 @@ individual absolute-scale variance.
 Rule order (first match wins):
 
 1. **Wake** — high motion + HR > resting+15 BPM
-2. **Deep** — very still (>0.95) + HR < resting+8 + HF > P50 + RMSSD > user sleep median + relative-night-position < 0.6
+2. **Deep** — very still (>0.95) + **HR < within-night 25th percentile** + HF > P50 + RMSSD > user sleep median + relative-night-position < 0.6
 3. **REM** — still (>0.85) + LF/HF > P50 + HR std > P50 + relative-night-position > 0.2
 4. **Light** — any remaining "sleep-ish" epoch with stillness > 0.7
 5. **Wake** — everything else
@@ -208,7 +208,19 @@ Initial thresholds (from the PRD) were stricter: Deep gated on P75 HF, first-hal
 - **`is_first_half` / `rel_night > 0.3`** strict boundaries miss Deep in early-second-half and REM in first-30% — both occur in real nights. Relaxed to `< 0.6` / `> 0.2`.
 - **Respiratory band** changed from 0.1–0.5 Hz to 0.15–0.4 Hz (see §5.6).
 
-After these changes, stage distribution on the reference test night (5h 34m) lands within PRD §6 population ranges: Light 65.8%, Deep 21.3%, REM 11.0%, Awake 1.9%, with Deep 70% front-loaded and REM 90% back-loaded.
+After these changes, stage distribution on the reference test night (5h 34m) lands within PRD §6 population ranges: Light 65.8%, Deep 21.3%, REM 11.0%, Awake 1.9%, with Deep 70% front-loaded and REM 90% back-loaded — when run with population-default baseline (no per-user history).
+
+#### rule-v2 — within-night HR percentile gate (2026-04-18)
+
+Once the per-user baseline matured (resting_hr = 48 from nightly-minimum on athletic user), rule-v1's `hr_mean < resting + 8` collapsed Deep from 21.3% to 2.7% on the same night. Root cause: `baseline.resting_hr` is defined as the mean of nightly-minimum HRs, which is itself a Deep-sleep HR — anchoring the Deep rule to it is tautological.
+
+Three independent research passes (ChatGPT, Claude, Gemini Deep Research) converged on the published convention: per-night HR normalization (Walch 2019 Apple Watch; Altini & Kinnunen 2021 Oura; Roberts 2020; Sridhar 2020; Perez-Pozuelo 2022 HypnosPy ECDF gate). No published wrist-staging classifier uses an absolute BPM threshold for Deep.
+
+Change: replace `hr_mean < baseline.resting_hr + 8` with `hr_mean < 25th percentile of this night's valid HRs`. Falls back to the legacy absolute rule when there are too few valid HRs to form a percentile. Bumped `CLASSIFIER_VERSION` to `"rule-v2"`.
+
+Outcome on the reference test night with personalized baseline: Deep climbed from 2.5% (rule-v1) to 4.4% (rule-v2). Performance score 63.1 → 63.6. The HR gate is no longer a bottleneck; the remaining limit is the conjunction with HF > P50 + RMSSD > baseline-median + first-60%-of-night. Further tuning of those gates is a separate ticket — the literature recommends them all stay relative; if Brennen's nightly RMSSD distribution sits below the population baseline median (47.4), the RMSSD gate may need to shift to a within-night percentile too.
+
+Forward-compat note: rule-v2's per-night HR normalization aligns the on-device feature distribution with what MESA's bzhai pipeline produces (pooled `StandardScaler` per training subject) — Phase 2 LightGBM training fits to the same family of features.
 
 Post-processing in order:
 
@@ -216,7 +228,7 @@ Post-processing in order:
 2. **Minimum duration** — single isolated epochs (sandwiched between two identical neighbors of a different stage) merge into the neighbor.
 3. **3-epoch median filter** — suppresses flicker; Unknown epochs preserved.
 
-Every emitted `EpochStage` is tagged `classifier_version = "rule-v1"`.
+Every emitted `EpochStage` is tagged `classifier_version = "rule-v2"` (was `"rule-v1"` pre-2026-04-18).
 
 ## 7. Algorithms — architecture (`architecture.rs`)
 
