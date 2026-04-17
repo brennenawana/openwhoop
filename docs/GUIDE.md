@@ -36,7 +36,7 @@ You only need to remember a handful. Run them all from the project folder.
 
 ### The daily/weekly routine
 1. **`download-history`** — pull whatever new data is on the strap.
-2. **`detect-events`** — look through the new data and figure out when you slept and when you were active.
+2. **`detect-events`** — look through the new data, figure out when you slept and when you were active, and score each night's sleep (stages, architecture, performance score).
 3. **`calculate-stress`**, **`calculate-spo2`**, **`calculate-skin-temp`** — derive the extra metrics from the raw signal.
 4. **`dashboard`** — print a one-page summary of where you stand.
 
@@ -91,9 +91,23 @@ If you're curious what the calculate-* commands are doing:
 - **Skin temperature** is a direct reading from a temperature sensor inside the strap, converted from raw sensor units into degrees Celsius.
 - **Strain** is a workload score from 0 to 21. It looks at how much time today you spent in each heart-rate zone and how hard each zone counts. A normal day at a desk is around 5–8; a hard workout pushes it into the teens.
 - **Sleep detection** finds long stretches at night where your body wasn't moving and your heart rate dropped. **Activity detection** finds the opposite — sustained periods of elevated heart rate and motion.
+- **Sleep staging** takes each detected sleep window and breaks it into 30-second epochs, labeling each one Wake / Light / Deep / REM based on motion, heart-rate variability, and breathing patterns. From that, it computes stage totals, a hypnogram, efficiency, wake events, sleep cycles, respiratory rate, skin-temp deviation, personalized sleep need and debt, and a composite Sleep Performance Score (0–100).
 - **Sleep consistency** measures how regular your bedtime and wake time are across the week. Going to bed at wildly different times costs you points.
 
-None of these are official WHOOP numbers — they're community implementations of the same ideas. They'll be in the same ballpark as the WHOOP app but won't match it exactly.
+None of these are official WHOOP numbers — they're community implementations of the same ideas. They'll be in the same ballpark as the WHOOP app but won't match it exactly. For the first 14 nights the sleep score is less reliable because the per-user baseline is still learning; after that it adapts to your personal HR and HRV.
+
+### Re-running sleep staging after a tweak
+
+If you (or a future version of the code) tweaks a classifier threshold,
+`reclassify-sleep` wipes and re-runs the staging for a range:
+
+```sh
+cargo run -r -- reclassify-sleep --from=2026-03-01
+```
+
+Omit `--to` to go up to today. Safe to re-run — only the `sleep_epochs`
+and staging columns on `sleep_cycles` are touched; raw heart_rate data
+is untouched.
 
 ## Where the data lives
 
@@ -107,7 +121,9 @@ Then `.tables` to see what's there. The interesting tables are:
 
 - `packets` — raw stuff straight from the strap.
 - `heart_rate` — one row per second-ish, with bpm, beat-to-beat intervals, and the derived stress/SpO2/temperature.
-- `sleep_cycles` — one row per night, summarizing the sleep.
+- `sleep_cycles` — one row per night, summarizing the sleep, including the performance score, stage totals, efficiency, respiratory rate, skin-temp deviation, need and debt.
+- `sleep_epochs` — one row per 30 seconds of sleep, with the stage label and the features that produced it (HRV, motion, breathing). Useful for drawing a hypnogram or retroactively tuning the classifier.
+- `user_baselines` — your personal rolling 14-night baselines for resting HR, HRV percentiles, respiratory rate, and skin temperature. The classifier uses these to adapt to you.
 - `activities` — one row per detected workout or activity period.
 
 If you ever want to start fresh, just delete `db.sqlite` and re-download.

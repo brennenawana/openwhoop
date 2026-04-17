@@ -2,7 +2,9 @@
 
 OpenWhoop is a project that allows you to download and analyze health data directly from your Whoop 4.0 device without a Whoop subscription or Whoop's servers, making the data your own.
 
-Features include sleep detection, exercise detection, stress calculation, HRV analysis, SpO2, skin temperature, and strain scoring — all computed locally from raw sensor data.
+Features include sleep detection, exercise detection, stress calculation, HRV analysis, SpO2, skin temperature, strain scoring, and sleep staging (Wake/Light/Deep/REM classification with architecture metrics and a composite Sleep Performance Score) — all computed locally from raw sensor data.
+
+For the deep-dive on sleep staging — algorithms, thresholds, schema, dev workflow — see [docs/SLEEP_STAGING.md](docs/SLEEP_STAGING.md).
 
 ## Getting Started
 
@@ -28,7 +30,8 @@ cargo run -r -- download-history
 |---------|-------------|
 | `scan` | Scan for available Whoop devices |
 | `download-history` | Download historical data from the device |
-| `detect-events` | Detect sleep and exercise events from raw data |
+| `detect-events` | Detect sleep and exercise events, then run sleep staging (classifies new cycles and refreshes the rolling baseline) |
+| `reclassify-sleep --from=<date> [--to=<date>]` | Wipe and re-run sleep staging over a date range. Use after tuning classifier thresholds. |
 | `sleep-stats` | Print sleep statistics (all-time and last 7 days) |
 | `exercise-stats` | Print exercise statistics (all-time and last 7 days) |
 | `calculate-stress` | Calculate stress scores (Baevsky stress index) |
@@ -175,5 +178,7 @@ The remaining sensor fields in each packet (which the original blog post marked 
 - [x] HRV analysis (RMSSD)
 - [x] Strain scoring (Edwards TRIMP)
 - [x] Database sync between SQLite and PostgreSQL
+- [x] Sleep staging — Wake/Light/Deep/REM, architecture metrics, Sleep Performance Score (Phase 1, rule-based)
+- [ ] Sleep staging Phase 2 — pretrained LightGBM via ONNX
 - [ ] Mobile/Desktop app
 - [ ] Testout Whoop 5.0
