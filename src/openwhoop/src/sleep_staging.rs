@@ -186,102 +186,6 @@ fn recompute_components(cycle: &sleep_cycles::Model) -> Option<ScoreComponentsBr
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::NaiveDate;
-    use uuid::Uuid;
-
-    fn cycle_fixture() -> sleep_cycles::Model {
-        let start = NaiveDate::from_ymd_opt(2026, 4, 16)
-            .unwrap()
-            .and_hms_opt(22, 0, 0)
-            .unwrap();
-        let end = start + chrono::TimeDelta::hours(8);
-        sleep_cycles::Model {
-            id: Uuid::new_v4(),
-            sleep_id: end.date(),
-            start,
-            end,
-            min_bpm: 50,
-            max_bpm: 70,
-            avg_bpm: 60,
-            min_hrv: 30,
-            max_hrv: 80,
-            avg_hrv: 55,
-            score: Some(85.0),
-            synced: false,
-            awake_minutes: Some(30.0),
-            light_minutes: Some(250.0),
-            deep_minutes: Some(90.0),
-            rem_minutes: Some(110.0),
-            sleep_latency_minutes: Some(15.0),
-            waso_minutes: Some(25.0),
-            sleep_efficiency: Some(90.0),
-            wake_event_count: Some(3),
-            cycle_count: Some(4),
-            avg_respiratory_rate: Some(14.0),
-            min_respiratory_rate: Some(11.0),
-            max_respiratory_rate: Some(18.0),
-            skin_temp_deviation_c: Some(0.2),
-            sleep_need_hours: Some(8.0),
-            sleep_debt_hours: Some(1.5),
-            performance_score: Some(85.0),
-            classifier_version: Some("rule-v1".to_string()),
-        }
-    }
-
-    #[test]
-    fn snapshot_pulls_stage_totals_from_cycle() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert_eq!(snap.stages.awake_min, 30.0);
-        assert_eq!(snap.stages.light_min, 250.0);
-        assert_eq!(snap.stages.deep_min, 90.0);
-        assert_eq!(snap.stages.rem_min, 110.0);
-    }
-
-    #[test]
-    fn snapshot_empty_epochs_produces_empty_hypnogram() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert!(snap.hypnogram.is_empty());
-    }
-
-    #[test]
-    fn snapshot_forwards_persisted_scalars() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        assert_eq!(snap.efficiency, Some(90.0));
-        assert_eq!(snap.latency_min, Some(15.0));
-        assert_eq!(snap.waso_min, Some(25.0));
-        assert_eq!(snap.cycle_count, Some(4));
-        assert_eq!(snap.wake_event_count, Some(3));
-        assert_eq!(snap.avg_respiratory_rate, Some(14.0));
-        assert_eq!(snap.skin_temp_deviation_c, Some(0.2));
-        assert_eq!(snap.performance_score, Some(85.0));
-        assert_eq!(snap.sleep_need_hours, Some(8.0));
-        assert_eq!(snap.sleep_debt_hours, Some(1.5));
-    }
-
-    #[test]
-    fn snapshot_recomputes_score_components() {
-        let cycle = cycle_fixture();
-        let snap = build_snapshot(&cycle, &[]);
-        let comps = snap.score_components.unwrap();
-        // total_sleep = (250 + 90 + 110) / 60 = 7.5 h
-        // sufficiency = 7.5 / 8.0 × 100 = 93.75
-        assert!((comps.sufficiency - 93.75).abs() < 0.01);
-        // tib = 480 min; restorative_pct = (90 + 110) / 480 × 100 = ~41.67
-        // restorative score = 41.67 / 45 × 100 ≈ 92.59
-        assert!((comps.restorative - 92.5925925925926).abs() < 0.01);
-        assert_eq!(comps.efficiency, 90.0);
-        // Neutral fallbacks for consistency + sleep_stress:
-        assert_eq!(comps.consistency, 50.0);
-        assert_eq!(comps.sleep_stress, 50.0);
-    }
-}
-
 /// Run the staging pipeline for every unstaged sleep cycle, then
 /// refresh the user baseline if stale. Safe to call on every sync.
 pub async fn stage_unclassified(db: &DatabaseHandler) -> anyhow::Result<StageResult> {
@@ -535,4 +439,101 @@ async fn refresh_baseline(db: &DatabaseHandler, force: bool) -> anyhow::Result<b
     db.insert_user_baseline(&snapshot, now).await?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use uuid::Uuid;
+
+    fn cycle_fixture() -> sleep_cycles::Model {
+        let start = NaiveDate::from_ymd_opt(2026, 4, 16)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let end = start + chrono::TimeDelta::hours(8);
+        sleep_cycles::Model {
+            id: Uuid::new_v4(),
+            sleep_id: end.date(),
+            start,
+            end,
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: Some(85.0),
+            synced: false,
+            awake_minutes: Some(30.0),
+            light_minutes: Some(250.0),
+            deep_minutes: Some(90.0),
+            rem_minutes: Some(110.0),
+            sleep_latency_minutes: Some(15.0),
+            waso_minutes: Some(25.0),
+            sleep_efficiency: Some(90.0),
+            wake_event_count: Some(3),
+            cycle_count: Some(4),
+            avg_respiratory_rate: Some(14.0),
+            min_respiratory_rate: Some(11.0),
+            max_respiratory_rate: Some(18.0),
+            skin_temp_deviation_c: Some(0.2),
+            sleep_need_hours: Some(8.0),
+            sleep_debt_hours: Some(1.5),
+            performance_score: Some(85.0),
+            classifier_version: Some("rule-v1".to_string()),
+        }
+    }
+
+    #[test]
+    fn snapshot_pulls_stage_totals_from_cycle() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert_eq!(snap.stages.awake_min, 30.0);
+        assert_eq!(snap.stages.light_min, 250.0);
+        assert_eq!(snap.stages.deep_min, 90.0);
+        assert_eq!(snap.stages.rem_min, 110.0);
+    }
+
+    #[test]
+    fn snapshot_empty_epochs_produces_empty_hypnogram() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert!(snap.hypnogram.is_empty());
+    }
+
+    #[test]
+    fn snapshot_forwards_persisted_scalars() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        assert_eq!(snap.efficiency, Some(90.0));
+        assert_eq!(snap.latency_min, Some(15.0));
+        assert_eq!(snap.waso_min, Some(25.0));
+        assert_eq!(snap.cycle_count, Some(4));
+        assert_eq!(snap.wake_event_count, Some(3));
+        assert_eq!(snap.avg_respiratory_rate, Some(14.0));
+        assert_eq!(snap.skin_temp_deviation_c, Some(0.2));
+        assert_eq!(snap.performance_score, Some(85.0));
+        assert_eq!(snap.sleep_need_hours, Some(8.0));
+        assert_eq!(snap.sleep_debt_hours, Some(1.5));
+    }
+
+    #[test]
+    fn snapshot_recomputes_score_components() {
+        let cycle = cycle_fixture();
+        let snap = build_snapshot(&cycle, &[]);
+        let comps = snap.score_components.unwrap();
+        // total_sleep = (250 + 90 + 110) / 60 = 7.5 h
+        // sufficiency = 7.5 / 8.0 × 100 = 93.75
+        assert!((comps.sufficiency - 93.75).abs() < 0.01);
+        // tib = 480 min; restorative_pct = (90 + 110) / 480 × 100 = ~41.67
+        // restorative score = 41.67 / 45 × 100 ≈ 92.59
+        assert!((comps.restorative - 92.5925925925926).abs() < 0.01);
+        assert_eq!(comps.efficiency, 90.0);
+        // Neutral fallbacks for consistency + sleep_stress:
+        assert_eq!(comps.consistency, 50.0);
+        assert_eq!(comps.sleep_stress, 50.0);
+    }
+}
+
 
