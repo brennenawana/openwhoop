@@ -17,6 +17,8 @@ pub mod sleep_staging;
 
 pub mod daily_snapshot;
 
+pub mod sleep_history;
+
 pub mod algo {
     pub use openwhoop_algos::*;
 }
