@@ -34,10 +34,9 @@ read 50 commits to pick up where you left off.
 
 ## What's next
 
-Rough priority order. The first item is the biggest unlock — a lot of
-shipped backend data is invisible to the user until the tray catches up.
+Rough priority order.
 
-1. **Tray UI integration** — plan in [docs/TRAY_INTEGRATION_PLAN.md](docs/TRAY_INTEGRATION_PLAN.md). Phase 1 (hypnogram + score components in the Latest Sleep card) is the highest-value first PR.
+1. **Tray UI — Phase 3 (optional)** — Phase 1 + Phase 2 shipped (hypnogram, stage bar, score radar, calibrating badge, Today card, daily snapshot command, firmware/sync status). Remaining: 14-night history page, sync log drawer, events/alarm log. Plan in [docs/TRAY_INTEGRATION_PLAN.md](docs/TRAY_INTEGRATION_PLAN.md). Tray repo commits: `159e444`, `bab3c75`, `250ee99`, `e9bc05b`, `494a4bd`.
 2. **Sleep staging follow-ups (open findings, deferred)**:
    - Rule-v2 Deep has a structural ~3–5% ceiling from the 5-gate AND-conjunction. Next moves: soft-score Deep, or drop one feature gate (RMSSD/HF overlap). See [SLEEP_STAGING.md §6](docs/SLEEP_STAGING.md) "Structural limit of percentile-AND conjunction".
    - Wake fall-through over-fires on restless-Light clusters (no HR confirmation on Rule 5). Proposed fix sketched. Both deferred pending ground-truth labels or Phase 2 ML.
