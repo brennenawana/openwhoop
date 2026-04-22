@@ -4,36 +4,73 @@
 //! the caller's responsibility. Every coefficient lives in
 //! [`super::constants`] so future config overrides only touch one
 //! place.
+//!
+//! Formulas follow WHOOP's publicly-documented additive structure
+//! (patent US20240252121A1 + developer API):
+//!
+//! ```text
+//! need = baseline + Δ_strain + Δ_debt + Δ_nap  (Δ_nap ≤ 0)
+//! ```
+//!
+//! Each term is grounded in primary sleep-science literature — see
+//! [`super::constants`] for citations on each coefficient.
 
 use super::constants::{
-    BASE_NEED_HOURS, DEBT_ADJ_CAP_HOURS, DEBT_ADJ_COEF, DEBT_DECAY_WEIGHTS, MAX_SLEEP_NEED_HOURS,
-    MIN_SLEEP_NEED_HOURS, NAP_CREDIT_FRAC, NEUTRAL_CONSISTENCY, NEUTRAL_SLEEP_STRESS,
-    RESTORATIVE_TARGET_PCT, SCORE_WEIGHTS, STRAIN_ADJ_COEF,
+    NEED_BASELINE_MAX_STRAIN, NEED_BASELINE_MIN_EFFICIENCY_PCT,
+    NEED_BASELINE_MIN_SLEEP_HOURS, NEED_BASELINE_MIN_USABLE_NIGHTS,
+    NEED_BASELINE_WINDOW_NIGHTS, BASE_NEED_HOURS, DEBT_ADJ_CAP_HOURS, DEBT_ADJ_COEF,
+    DEBT_DECAY_WEIGHTS, MAX_SLEEP_NEED_HOURS, MIN_SLEEP_NEED_HOURS, NAP_CREDIT_FRAC,
+    NEUTRAL_CONSISTENCY, NEUTRAL_SLEEP_STRESS, RESTORATIVE_TARGET_PCT, SCORE_WEIGHTS,
+    STRAIN_ADJ_CAP_MIN, STRAIN_LINEAR_COEF, STRAIN_NONLINEAR_COEF, STRAIN_NONLINEAR_POWER,
+    STRAIN_NONLINEAR_THRESHOLD, SURPLUS_CREDIT_CAP_HOURS, SURPLUS_CREDIT_COEF,
 };
 
-/// Inputs for the per-night sleep-need calculation (PRD §5.7).
+/// Inputs for the per-night sleep-need calculation.
 #[derive(Debug, Clone, Default)]
 pub struct SleepNeedInputs {
-    /// Defaults to `BASE_NEED_HOURS`. Override with the user's own
-    /// mean on recovered nights once 30+ nights of data exist.
+    /// Personalized baseline from [`personalized_baseline_hours`], or
+    /// `None` to use the population default [`BASE_NEED_HOURS`].
     pub base_need_hours: Option<f64>,
-    /// Prior-day WHOOP-scale strain (0–21). `None` = unknown.
+    /// Prior-day WHOOP-scale strain (0–21). `None` = unknown → 0.
     pub prior_day_strain: Option<f64>,
-    /// Rolling 7-day debt (already decay-weighted) in hours.
-    pub rolling_7d_debt_hours: f64,
-    /// Total nap minutes in the prior day. Half-credited toward
-    /// tonight's need.
+    /// Decay-weighted mean of qualifying naps (minutes). Only naps
+    /// ending ≥ [`NAP_BEDTIME_GUARD_MINUTES`] before bedtime count.
     pub nap_minutes: f64,
+    /// Pre-computed rolling sleep debt (hours). See
+    /// [`sleep_debt_hours`].
+    pub rolling_7d_debt_hours: f64,
+    /// Pre-computed rolling sleep surplus (hours), only used when
+    /// `allow_surplus_banking` is true. See [`sleep_surplus_hours`].
+    pub rolling_7d_surplus_hours: f64,
+    /// Enable Rupp 2009 "banking" behavior: surplus sleep across the
+    /// window reduces tonight's need. WHOOP does NOT expose this.
+    /// Default `false` matches WHOOP's user-facing number.
+    pub allow_surplus_banking: bool,
+}
+
+/// Compute the strain-driven addition to tonight's need, in HOURS.
+/// Public so callers can display the decomposition separately.
+pub fn strain_addition_hours(strain: f64) -> f64 {
+    let linear = STRAIN_LINEAR_COEF * strain.max(0.0);
+    let over = (strain - STRAIN_NONLINEAR_THRESHOLD).max(0.0);
+    let nonlinear = STRAIN_NONLINEAR_COEF * over.powf(STRAIN_NONLINEAR_POWER);
+    let total_min = (linear + nonlinear).min(STRAIN_ADJ_CAP_MIN);
+    total_min / 60.0
 }
 
 /// Compute personalized sleep need for tonight, in hours, clamped to
 /// [`MIN_SLEEP_NEED_HOURS`, `MAX_SLEEP_NEED_HOURS`].
 pub fn sleep_need_hours(inputs: &SleepNeedInputs) -> f64 {
     let base = inputs.base_need_hours.unwrap_or(BASE_NEED_HOURS);
-    let strain_adj = inputs.prior_day_strain.unwrap_or(0.0) * STRAIN_ADJ_COEF;
+    let strain_adj = strain_addition_hours(inputs.prior_day_strain.unwrap_or(0.0));
     let debt_adj = (inputs.rolling_7d_debt_hours * DEBT_ADJ_COEF).min(DEBT_ADJ_CAP_HOURS);
     let nap_credit = inputs.nap_minutes * NAP_CREDIT_FRAC / 60.0;
-    let need = base + strain_adj + debt_adj - nap_credit;
+    let surplus_credit = if inputs.allow_surplus_banking {
+        (inputs.rolling_7d_surplus_hours * SURPLUS_CREDIT_COEF).min(SURPLUS_CREDIT_CAP_HOURS)
+    } else {
+        0.0
+    };
+    let need = base + strain_adj + debt_adj - nap_credit - surplus_credit;
     need.clamp(MIN_SLEEP_NEED_HOURS, MAX_SLEEP_NEED_HOURS)
 }
 
@@ -44,20 +81,102 @@ pub struct NightSleep {
     pub actual_sleep_hours: f64,
 }
 
-/// Rolling 7-day sleep debt with decay weighting (PRD §5.8).
-/// `recent_nights` is ordered most-recent-first; anything beyond 7
-/// entries is ignored. If fewer than 7 nights are provided, the
-/// available ones are used with their respective decay weights.
+/// Rolling 7-day sleep debt as a decay-weighted mean shortfall
+/// (hours short per night). `recent_nights` is ordered most-recent-
+/// first; beyond 7 is ignored. Dividing by Σ included weights makes
+/// the returned value interpretable as "average hours short per
+/// night (weighted toward recency)."
 pub fn sleep_debt_hours(recent_nights: &[NightSleep]) -> f64 {
-    recent_nights
+    weighted_mean_deficit(recent_nights, |n| {
+        (n.sleep_need_hours - n.actual_sleep_hours).max(0.0)
+    })
+}
+
+/// Rolling 7-day sleep *surplus* as a decay-weighted mean excess
+/// (hours slept over need). Counterpart to [`sleep_debt_hours`] for
+/// the Rupp 2009 banking path. Same window + weights; one-sided.
+pub fn sleep_surplus_hours(recent_nights: &[NightSleep]) -> f64 {
+    weighted_mean_deficit(recent_nights, |n| {
+        (n.actual_sleep_hours - n.sleep_need_hours).max(0.0)
+    })
+}
+
+fn weighted_mean_deficit<F: Fn(&NightSleep) -> f64>(
+    recent_nights: &[NightSleep],
+    project: F,
+) -> f64 {
+    let (num, den) = recent_nights
         .iter()
         .zip(DEBT_DECAY_WEIGHTS.iter())
-        .map(|(night, &w)| {
-            let shortfall = (night.sleep_need_hours - night.actual_sleep_hours).max(0.0);
-            shortfall * w
-        })
-        .sum()
+        .fold((0.0, 0.0), |(n, d), (night, &w)| {
+            (n + w * project(night), d + w)
+        });
+    if den <= 0.0 { 0.0 } else { num / den }
 }
+
+/// A historical night with enough context to decide whether it's
+/// "baseline-eligible" — i.e. low-strain, well-slept, nap-free.
+#[derive(Debug, Clone, Copy)]
+pub struct BaselineNight {
+    pub actual_sleep_hours: f64,
+    pub sleep_efficiency_pct: f64,
+    pub day_strain: f64,
+    pub had_nap: bool,
+}
+
+impl BaselineNight {
+    fn eligible(&self) -> bool {
+        self.day_strain <= NEED_BASELINE_MAX_STRAIN
+            && self.sleep_efficiency_pct >= NEED_BASELINE_MIN_EFFICIENCY_PCT
+            && self.actual_sleep_hours >= NEED_BASELINE_MIN_SLEEP_HOURS
+            && !self.had_nap
+    }
+}
+
+/// Compute the per-user baseline sleep need (hours) from the last
+/// [`NEED_BASELINE_WINDOW_NIGHTS`] of data. Filters for "typical rest day"
+/// nights and takes a trimmed mean (drops top + bottom 10% of samples
+/// to resist outliers).
+///
+/// Blends linearly toward [`BASE_NEED_HOURS`] until
+/// [`NEED_BASELINE_MIN_USABLE_NIGHTS`] eligible nights accumulate — so
+/// early users aren't whipped around by one or two outlier nights.
+///
+/// `recent_nights` is ordered most-recent-first; beyond
+/// [`NEED_BASELINE_WINDOW_NIGHTS`] is ignored.
+pub fn personalized_baseline_hours(recent_nights: &[BaselineNight]) -> f64 {
+    let eligible: Vec<f64> = recent_nights
+        .iter()
+        .take(NEED_BASELINE_WINDOW_NIGHTS)
+        .filter(|n| n.eligible())
+        .map(|n| n.actual_sleep_hours)
+        .collect();
+
+    if eligible.is_empty() {
+        return BASE_NEED_HOURS;
+    }
+
+    let mut sorted = eligible.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Drop top + bottom 10% (at least 0; at most half-1 each side).
+    let drop_each = (sorted.len() / 10).min(sorted.len().saturating_sub(1) / 2);
+    let trimmed = &sorted[drop_each..sorted.len() - drop_each];
+    let personalized = trimmed.iter().sum::<f64>() / trimmed.len() as f64;
+
+    let alpha = (eligible.len() as f64 / NEED_BASELINE_MIN_USABLE_NIGHTS as f64).min(1.0);
+    alpha * personalized + (1.0 - alpha) * BASE_NEED_HOURS
+}
+
+/// How many of the last `NEED_BASELINE_WINDOW_NIGHTS` qualify for the
+/// baseline computation. Exposed for UI "calibrating" hints.
+pub fn baseline_eligible_nights(recent_nights: &[BaselineNight]) -> usize {
+    recent_nights
+        .iter()
+        .take(NEED_BASELINE_WINDOW_NIGHTS)
+        .filter(|n| n.eligible())
+        .count()
+}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceComponents {
@@ -144,13 +263,28 @@ mod tests {
     }
 
     #[test]
-    fn need_strain_adjustment_scales_linearly() {
-        let inputs = SleepNeedInputs {
-            prior_day_strain: Some(21.0),
-            ..Default::default()
-        };
-        // 7.5 + 21 * 0.05 = 8.55
-        assert!((sleep_need_hours(&inputs) - 8.55).abs() < 1e-9);
+    fn strain_addition_is_zero_at_zero_and_monotonic() {
+        assert_eq!(strain_addition_hours(0.0), 0.0);
+        assert!(strain_addition_hours(5.0) < strain_addition_hours(10.0));
+        assert!(strain_addition_hours(10.0) < strain_addition_hours(15.0));
+        assert!(strain_addition_hours(15.0) < strain_addition_hours(21.0));
+    }
+
+    #[test]
+    fn strain_addition_capped_at_max() {
+        // Strain 21 should be ≤ 90 min = 1.5 h. Even absurd strain
+        // shouldn't exceed the cap.
+        assert!(strain_addition_hours(21.0) <= STRAIN_ADJ_CAP_MIN / 60.0 + 1e-9);
+        assert!(strain_addition_hours(100.0) <= STRAIN_ADJ_CAP_MIN / 60.0 + 1e-9);
+    }
+
+    #[test]
+    fn strain_addition_is_superlinear_past_threshold() {
+        // From 10→15 (5 units past threshold) should add much more
+        // than 0→5 (pure linear creep).
+        let creep_0_to_5 = strain_addition_hours(5.0);
+        let jump_10_to_15 = strain_addition_hours(15.0) - strain_addition_hours(10.0);
+        assert!(jump_10_to_15 > creep_0_to_5 * 4.0);
     }
 
     #[test]
@@ -160,7 +294,7 @@ mod tests {
             rolling_7d_debt_hours: 20.0, // debt adj capped at 2.0
             ..Default::default()
         };
-        // 7.5 + 1.05 + 2.0 = 10.55 -> clamped to 10.0
+        // 7.5 + ~1.17 + 2.0 = 10.67 → clamped to MAX (10.5).
         assert_eq!(sleep_need_hours(&inputs), MAX_SLEEP_NEED_HOURS);
     }
 
@@ -168,20 +302,51 @@ mod tests {
     fn need_clamped_below_min() {
         let inputs = SleepNeedInputs {
             base_need_hours: Some(5.0),
-            nap_minutes: 300.0, // 2.5h half-credit = 1.25h
+            nap_minutes: 180.0, // 3h nap × 1.0 credit = 3.0h
             ..Default::default()
         };
-        // 5 - 1.25 = 3.75 -> clamped to 6.0
+        // 5 - 3 = 2 → clamped to 6.0.
         assert_eq!(sleep_need_hours(&inputs), MIN_SLEEP_NEED_HOURS);
     }
 
     #[test]
-    fn need_nap_credit_reduces_need() {
+    fn need_nap_credit_full() {
         let inputs = SleepNeedInputs {
-            nap_minutes: 60.0, // 1h nap × 0.5 credit = 0.5h
+            nap_minutes: 60.0, // 1h nap × 1.0 credit = 1.0h
             ..Default::default()
         };
-        assert!((sleep_need_hours(&inputs) - (BASE_NEED_HOURS - 0.5)).abs() < 1e-9);
+        assert!((sleep_need_hours(&inputs) - (BASE_NEED_HOURS - 1.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn surplus_banking_off_by_default() {
+        let inputs = SleepNeedInputs {
+            rolling_7d_surplus_hours: 5.0, // ignored
+            ..Default::default()
+        };
+        assert_eq!(sleep_need_hours(&inputs), BASE_NEED_HOURS);
+    }
+
+    #[test]
+    fn surplus_banking_reduces_need_when_enabled() {
+        let inputs = SleepNeedInputs {
+            rolling_7d_surplus_hours: 2.0,
+            allow_surplus_banking: true,
+            ..Default::default()
+        };
+        // 7.5 - (2.0 * 0.3) = 6.9
+        assert!((sleep_need_hours(&inputs) - (BASE_NEED_HOURS - 0.6)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn surplus_credit_capped() {
+        let inputs = SleepNeedInputs {
+            rolling_7d_surplus_hours: 100.0,
+            allow_surplus_banking: true,
+            ..Default::default()
+        };
+        // Credit capped at SURPLUS_CREDIT_CAP_HOURS = 1.0.
+        assert!((sleep_need_hours(&inputs) - (BASE_NEED_HOURS - 1.0)).abs() < 1e-9);
     }
 
     // ----- sleep debt -----
@@ -199,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn debt_decay_weights_applied() {
-        // 1h shortfall each night for 7 nights -> sum of weights = 3.9
+    fn debt_weighted_mean_is_one_hour_for_sustained_one_hour_deficit() {
+        // 1h shortfall each night for 7 nights → weighted mean = 1.0h.
         let nights = vec![
             NightSleep {
                 sleep_need_hours: 8.0,
@@ -208,8 +373,7 @@ mod tests {
             };
             7
         ];
-        let expected = DEBT_DECAY_WEIGHTS.iter().sum::<f64>();
-        assert!((sleep_debt_hours(&nights) - expected).abs() < 1e-9);
+        assert!((sleep_debt_hours(&nights) - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -227,6 +391,119 @@ mod tests {
         let without_extras = sleep_debt_hours(&nights);
         assert_eq!(with_extras, without_extras);
     }
+
+    // ----- surplus banking -----
+
+    #[test]
+    fn surplus_zero_when_fully_rested() {
+        let nights = vec![
+            NightSleep {
+                sleep_need_hours: 8.0,
+                actual_sleep_hours: 8.0,
+            };
+            7
+        ];
+        assert_eq!(sleep_surplus_hours(&nights), 0.0);
+    }
+
+    #[test]
+    fn surplus_weighted_mean_is_one_hour_for_sustained_one_hour_excess() {
+        let nights = vec![
+            NightSleep {
+                sleep_need_hours: 8.0,
+                actual_sleep_hours: 9.0,
+            };
+            7
+        ];
+        assert!((sleep_surplus_hours(&nights) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn surplus_is_one_sided() {
+        // Mixing shortfall and excess doesn't cross-subtract: each
+        // fn only sees its own sign.
+        let nights = vec![
+            NightSleep { sleep_need_hours: 8.0, actual_sleep_hours: 10.0 }, // +2h
+            NightSleep { sleep_need_hours: 8.0, actual_sleep_hours: 6.0 },  // −2h
+        ];
+        assert!(sleep_surplus_hours(&nights) > 0.0);
+        assert!(sleep_debt_hours(&nights) > 0.0);
+    }
+
+    // ----- personalized baseline -----
+
+    #[test]
+    fn baseline_empty_returns_population_default() {
+        assert_eq!(personalized_baseline_hours(&[]), BASE_NEED_HOURS);
+    }
+
+    #[test]
+    fn baseline_ineligible_nights_return_population_default() {
+        // High strain + low efficiency + had-nap → filtered out.
+        let nights = vec![
+            BaselineNight {
+                actual_sleep_hours: 9.0,
+                sleep_efficiency_pct: 60.0,
+                day_strain: 15.0,
+                had_nap: true,
+            };
+            20
+        ];
+        assert_eq!(personalized_baseline_hours(&nights), BASE_NEED_HOURS);
+    }
+
+    #[test]
+    fn baseline_converges_to_personal_mean_with_enough_eligible() {
+        // 14 eligible nights of 8.2h → alpha=1.0, trimmed mean = 8.2.
+        let nights = vec![
+            BaselineNight {
+                actual_sleep_hours: 8.2,
+                sleep_efficiency_pct: 92.0,
+                day_strain: 5.0,
+                had_nap: false,
+            };
+            14
+        ];
+        assert!((personalized_baseline_hours(&nights) - 8.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_blends_toward_default_with_few_nights() {
+        // 7 eligible nights of 9.0h → alpha = 7/14 = 0.5.
+        // Blended = 0.5 * 9.0 + 0.5 * 7.5 = 8.25.
+        let nights = vec![
+            BaselineNight {
+                actual_sleep_hours: 9.0,
+                sleep_efficiency_pct: 92.0,
+                day_strain: 5.0,
+                had_nap: false,
+            };
+            7
+        ];
+        assert!((personalized_baseline_hours(&nights) - 8.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_eligible_nights_counts_correctly() {
+        let mut nights = vec![
+            BaselineNight {
+                actual_sleep_hours: 8.0,
+                sleep_efficiency_pct: 92.0,
+                day_strain: 5.0,
+                had_nap: false,
+            };
+            5
+        ];
+        nights.push(BaselineNight {
+            actual_sleep_hours: 8.0,
+            sleep_efficiency_pct: 92.0,
+            day_strain: 18.0, // high strain — filtered
+            had_nap: false,
+        });
+        assert_eq!(baseline_eligible_nights(&nights), 5);
+    }
+
+    // ----- original decay-over-time sanity -----
 
     #[test]
     fn debt_decays_over_time() {
