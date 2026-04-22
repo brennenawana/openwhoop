@@ -498,6 +498,18 @@ impl OpenWhoop {
         let now = Local::now().naive_local();
         let window_start = now - TimeDelta::days(14);
         let window_end = now;
+        // Idempotency: drop stale rows in the range before reinsert.
+        // Without this, each sync stacked another copy of every 5-min
+        // window (real-world observations hit 1408× duplication).
+        match self
+            .database
+            .delete_hrv_samples_in_range(window_start, window_end)
+            .await
+        {
+            Ok(n) if n > 0 => info!("hrv_samples: cleared {n} stale rows before reinsert"),
+            Ok(_) => {}
+            Err(e) => log::warn!("failed to clear stale hrv_samples: {e:#}"),
+        }
         let wear_periods = self
             .database
             .get_wear_periods_overlapping(window_start, window_end)
@@ -539,6 +551,19 @@ impl OpenWhoop {
         let now = Local::now().naive_local();
         let window_start = now - TimeDelta::days(14);
         let window_end = now;
+        // Idempotency: drop stale rows in the range before reinsert.
+        // Without this, each sync stacked another copy of every
+        // 1-min window — user's live DB had ~16× duplication producing
+        // 796h of "active" time across a 14-day span.
+        match self
+            .database
+            .delete_activity_samples_in_range(window_start, window_end)
+            .await
+        {
+            Ok(n) if n > 0 => info!("activity_samples: cleared {n} stale rows before reinsert"),
+            Ok(_) => {}
+            Err(e) => log::warn!("failed to clear stale activity_samples: {e:#}"),
+        }
         let wear_periods = self
             .database
             .get_wear_periods_overlapping(window_start, window_end)

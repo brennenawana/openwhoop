@@ -39,6 +39,23 @@ impl DatabaseHandler {
             .all(&self.db)
             .await?)
     }
+
+    /// Delete all hrv_samples rows whose `window_start` falls in
+    /// `[start, end]`. Used by [`compute_daytime_hrv`] to make re-runs
+    /// idempotent; without this, every sync re-inserted copies of every
+    /// 5-minute window (observed up to 1408× duplication in the wild).
+    pub async fn delete_hrv_samples_in_range(
+        &self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    ) -> anyhow::Result<u64> {
+        let res = hrv_samples::Entity::delete_many()
+            .filter(hrv_samples::Column::WindowStart.gte(start))
+            .filter(hrv_samples::Column::WindowStart.lte(end))
+            .exec(&self.db)
+            .await?;
+        Ok(res.rows_affected)
+    }
 }
 
 #[cfg(test)]

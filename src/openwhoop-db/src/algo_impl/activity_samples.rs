@@ -39,6 +39,24 @@ impl DatabaseHandler {
             .all(&self.db)
             .await?)
     }
+
+    /// Delete all activity_samples rows whose `window_start` falls in
+    /// `[start, end]`. Used by [`classify_activities`] to make re-runs
+    /// idempotent; without this, every sync re-inserted copies of every
+    /// minute-window and downstream sums over-counted by the number of
+    /// syncs.
+    pub async fn delete_activity_samples_in_range(
+        &self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    ) -> anyhow::Result<u64> {
+        let res = activity_samples::Entity::delete_many()
+            .filter(activity_samples::Column::WindowStart.gte(start))
+            .filter(activity_samples::Column::WindowStart.lte(end))
+            .exec(&self.db)
+            .await?;
+        Ok(res.rows_affected)
+    }
 }
 
 #[cfg(test)]
