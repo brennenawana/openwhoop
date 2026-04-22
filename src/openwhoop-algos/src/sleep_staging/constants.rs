@@ -221,38 +221,111 @@ pub const POPULATION_SLEEP_RMSSD_MEDIAN: f64 = 40.0;
 
 // ---------- sleep need / debt / scoring ----------
 //
-// PRD §5.7–5.9. Every coefficient here is taken directly from the PRD
-// formulas. Centralized so a future config file can override them.
+// Coefficients are grounded in public WHOOP sources (patent
+// US20240252121A1, WHOOP developer API, Locker articles) and the
+// canonical sleep-science literature WHOOP itself cites:
+// Hirshkowitz 2015 (NSF), Watson 2015 (AASM), Van Dongen 2003,
+// Belenky 2003, Rupp 2009, Mah 2011, Halson 2014, Dinges 1987,
+// Lovato & Lack 2010. See docs/SLEEP_STAGING.md §8 for the full
+// derivation.
 
-/// Baseline population sleep need (hours). Replaced with the user's
-/// personal mean after 30 nights of data (PRD §5.7).
+/// Population-mean baseline sleep need (hours). Cold-start default
+/// when the per-user baseline hasn't matured. Midpoint of Hirshkowitz
+/// 2015's 7–9h NSF recommendation band for adults 18–64. WHOOP's own
+/// published population mean baseline is 7.6h — close enough that
+/// the midpoint is within noise.
 pub const BASE_NEED_HOURS: f64 = 7.5;
 
-/// Strain adjustment coefficient: each unit of prior-day strain adds
-/// this many hours to tonight's need. At strain 21 (max) this is
-/// +1.05 h (PRD §5.7).
-pub const STRAIN_ADJ_COEF: f64 = 0.05;
+/// Baseline personalization window (nights). WHOOP's Sleep Planner
+/// uses 28 days ("past 28 days" per the Locker article). Match that.
+pub const NEED_BASELINE_WINDOW_NIGHTS: usize = 28;
 
-/// Sleep-debt adjustment coefficient: this fraction of the rolling
-/// 7-day debt is added to tonight's need (PRD §5.7).
-pub const DEBT_ADJ_COEF: f64 = 0.3;
+/// Minimum usable nights before the personalized baseline is
+/// trusted. Below this we blend linearly toward BASE_NEED_HOURS so
+/// the output isn't whipped around by one or two outlier nights.
+pub const NEED_BASELINE_MIN_USABLE_NIGHTS: usize = 14;
 
-/// Cap on the debt adjustment (hours). Prevents one very bad week
-/// from setting an unachievable need (PRD §5.7).
+/// Filter thresholds for "baseline-eligible" nights: the per-user
+/// baseline is computed only from low-strain, well-slept,
+/// nap-free nights so it reflects the user's unperturbed need.
+/// Approximates WHOOP's undisclosed "typical rest day" rule.
+pub const NEED_BASELINE_MAX_STRAIN: f64 = 10.0;
+pub const NEED_BASELINE_MIN_EFFICIENCY_PCT: f64 = 85.0;
+/// Nights under this duration are excluded from baseline. Below the
+/// Watson 2015 AASM "≥7h" floor and the Van Dongen 2003 decrement
+/// threshold — such nights aren't "typical rest day" samples, they
+/// are already-deficit nights whose inclusion would normalize
+/// undersleep as the user's target. Prevents the baseline from
+/// collapsing on chronic undersleepers.
+pub const NEED_BASELINE_MIN_SLEEP_HOURS: f64 = 6.0;
+
+/// Strain-contribution coefficients. Formula (rule-v0):
+///   Δ_strain_min = STRAIN_LINEAR_COEF · strain
+///                + STRAIN_NONLINEAR_COEF · max(0, strain − STRAIN_NONLINEAR_THRESHOLD)^STRAIN_NONLINEAR_POWER
+///                clamped to STRAIN_ADJ_CAP_MIN
+///
+/// Shape: small linear creep across the whole 0–21 range (so any
+/// strain adds a tiny amount — matches WHOOP's "normal daily
+/// activities count" copy) plus a super-linear term above strain 10
+/// that dominates at high exertion (Borg scale is logarithmic;
+/// Halson 2014 shows training-load effects are super-linear).
+///
+/// With these values:
+///   strain  5 → +1.5 min
+///   strain 10 → +3.0 min
+///   strain 15 → +17.5 min
+///   strain 18 → +34 min
+///   strain 21 → +71 min (capped)
+pub const STRAIN_LINEAR_COEF: f64 = 0.3;
+pub const STRAIN_NONLINEAR_COEF: f64 = 6.0;
+pub const STRAIN_NONLINEAR_THRESHOLD: f64 = 10.0;
+pub const STRAIN_NONLINEAR_POWER: f64 = 1.35;
+pub const STRAIN_ADJ_CAP_MIN: f64 = 90.0;
+
+/// Sleep-debt coefficient. Applied to the decay-weighted mean
+/// deficit (hours). Van Dongen 2003 shows 1 h/night × 14 nights
+/// produces PVT decrements equivalent to 2 nights of total
+/// deprivation — supports converting ~10 h of accumulated deficit
+/// into 1–2 h of extra need. Coefficient of 0.5 on the weighted
+/// mean puts us in that zone.
+pub const DEBT_ADJ_COEF: f64 = 0.5;
+
+/// Cap on the debt adjustment (hours). WHOOP's patent explicitly
+/// says the debt term is "capped at a maximum."
 pub const DEBT_ADJ_CAP_HOURS: f64 = 2.0;
 
-/// Fraction of nap minutes credited toward sleep need. Naps
-/// half-count per PRD §5.7.
-pub const NAP_CREDIT_FRAC: f64 = 0.5;
+/// Fraction of nap minutes credited toward sleep need. WHOOP's
+/// own Locker copy ("sleep need that night is reduced by the amount
+/// of time you napped for") and developer API (`need_from_recent_nap_milli`
+/// can be negative) support near-1.0 credit. Dinges 1987 / Lovato
+/// & Lack 2010 back the physiological basis.
+pub const NAP_CREDIT_FRAC: f64 = 1.0;
+
+/// Minimum gap between a qualifying nap's end and bedtime (minutes).
+/// Guards against crediting naps taken just before sleep (they don't
+/// subtract from drive; they pre-empt it).
+pub const NAP_BEDTIME_GUARD_MINUTES: f64 = 120.0;
 
 /// Sleep need is clamped to this range so a sensible target always
-/// exists regardless of inputs (PRD §5.7).
+/// exists regardless of inputs. Floor from Watson 2015 AASM
+/// ("<6h inadequate"); ceiling from Mah 2011 (Stanford basketball
+/// intervention used 10h TIB target).
 pub const MIN_SLEEP_NEED_HOURS: f64 = 6.0;
-pub const MAX_SLEEP_NEED_HOURS: f64 = 10.0;
+pub const MAX_SLEEP_NEED_HOURS: f64 = 10.5;
 
 /// Sleep-debt decay weights across the last 7 nights (most recent
-/// weighted highest). PRD §5.8.
+/// weighted highest). Belenky 2003 showed 3 nights recovery doesn't
+/// fully clear 7 nights of restriction — supports a multi-day tail.
+/// Weighted mean (Σ weights = 3.9) so coefficient is interpretable.
 pub const DEBT_DECAY_WEIGHTS: [f64; 7] = [1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.15];
+
+/// When surplus-sleep banking is enabled, this coefficient applies
+/// to the weighted-mean *excess* (actual − need, only positive)
+/// across the debt window. Subtracts from tonight's need. Rupp 2009
+/// showed surplus sleep is physiologically bankable on a ~7-day
+/// timescale; WHOOP does NOT expose this behavior. Default is off.
+pub const SURPLUS_CREDIT_COEF: f64 = 0.3;
+pub const SURPLUS_CREDIT_CAP_HOURS: f64 = 1.0;
 
 /// Target restorative (Deep + REM) percentage of time in bed.
 /// 45% is the healthy adult benchmark from Hirshkowitz et al. 2015

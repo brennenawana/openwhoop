@@ -9,10 +9,11 @@
 use chrono::{Local, NaiveDateTime, TimeDelta};
 use openwhoop_algos::{SleepConsistencyAnalyzer, StrainCalculator};
 use openwhoop_algos::sleep_staging::{
-    self, ArchitectureMetrics, CLASSIFIER_VERSION, EpochFeatures, EpochStage, NightSleep,
-    PerformanceScore, RespiratoryStats, ScoringInputs, SleepNeedInputs, UserBaseline,
+    self, ArchitectureMetrics, BaselineNight, CLASSIFIER_VERSION, EpochFeatures, EpochStage,
+    NightSleep, PerformanceScore, RespiratoryStats, ScoringInputs, SleepNeedInputs, UserBaseline,
     build_epochs, classify_epochs, compute_baseline, compute_metrics, nightly_respiratory_rate,
-    nightly_skin_temp, performance_score, should_update, sleep_debt_hours, sleep_need_hours,
+    nightly_skin_temp, performance_score, personalized_baseline_hours, should_update,
+    sleep_debt_hours, sleep_need_hours, sleep_surplus_hours,
 };
 use openwhoop_db::{DatabaseHandler, SearchHistory, StageCycleUpdate};
 use openwhoop_entities::{sleep_cycles, sleep_epochs, user_baselines};
@@ -319,15 +320,21 @@ async fn stage_one_cycle(
     // 6. Skin temperature deviation vs rolling baseline.
     let skin_deviation = compute_skin_temp_deviation(db, cycle, baseline).await?;
 
-    // 7. Sleep need / debt.
+    // 7. Sleep need / debt / surplus / baseline.
     let nap_minutes = db.sum_nap_minutes_in_prior_day(cycle.end).await.unwrap_or(0.0);
-    let debt = compute_prior_sleep_debt(db, cycle.start).await?;
+    let (debt, surplus) = compute_prior_sleep_debt_and_surplus(db, cycle.start).await?;
     let prior_day_strain = compute_prior_day_strain(db, baseline, cycle.start).await;
+    let personalized_baseline = compute_personalized_baseline(db, cycle.start).await?;
     let need_inputs = SleepNeedInputs {
-        base_need_hours: None,
+        base_need_hours: Some(personalized_baseline),
         prior_day_strain,
         rolling_7d_debt_hours: debt,
+        rolling_7d_surplus_hours: surplus,
         nap_minutes,
+        // Surplus-banking is a user setting; default false matches
+        // WHOOP's user-facing behavior. A future config wire-up can
+        // override this per-user.
+        allow_surplus_banking: false,
     };
     let need = sleep_need_hours(&need_inputs);
 
@@ -466,13 +473,14 @@ async fn compute_consistency_score(
     }
 }
 
-async fn compute_prior_sleep_debt(
+async fn compute_prior_sleep_debt_and_surplus(
     db: &DatabaseHandler,
     current_cycle_start: NaiveDateTime,
-) -> anyhow::Result<f64> {
+) -> anyhow::Result<(f64, f64)> {
     // Pull up to 7 prior staged cycles ending before the current
     // cycle starts. For each, use its stored sleep_need_hours and
-    // infer actual sleep hours from the stage minutes.
+    // infer actual sleep hours from the stage minutes. Debt and
+    // surplus are derived from the same underlying night list.
     let seven_days_ago = current_cycle_start - TimeDelta::days(7);
     let recent = db.get_sleep_cycle_models(Some(seven_days_ago)).await?;
     let recent: Vec<&sleep_cycles::Model> = recent
@@ -481,7 +489,6 @@ async fn compute_prior_sleep_debt(
         .collect();
 
     let mut nights: Vec<NightSleep> = Vec::new();
-    // Most-recent-first, up to 7 entries.
     for cycle in recent.iter().rev().take(7) {
         let need = cycle.sleep_need_hours.unwrap_or(7.5);
         let actual = cycle
@@ -489,16 +496,52 @@ async fn compute_prior_sleep_debt(
             .zip(cycle.deep_minutes)
             .zip(cycle.rem_minutes)
             .map(|((l, d), r)| (l + d + r) / 60.0)
-            // Fall back to the existing `score`-based sleep estimate:
-            // the pre-staging sleep_score was (actual_hours / 8) × 100,
-            // so actual ≈ score / 100 × 8.
             .unwrap_or_else(|| cycle.score.unwrap_or(0.0) / 100.0 * 8.0);
         nights.push(NightSleep {
             sleep_need_hours: need,
             actual_sleep_hours: actual,
         });
     }
-    Ok(sleep_debt_hours(&nights))
+    Ok((sleep_debt_hours(&nights), sleep_surplus_hours(&nights)))
+}
+
+/// Compute the 28-night personalized baseline. Uses sleep_cycles'
+/// existing staged columns (no per-night strain pull — keeps the
+/// lookup O(1 DB query) instead of O(N 24h heart_rate scans)).
+///
+/// Eligibility filter relies on efficiency + no-nap. The strain
+/// component of [`BaselineNight::eligible`] is filled with 0 (always
+/// passes) until we persist per-night day_strain on sleep_cycles;
+/// that's a future enhancement.
+async fn compute_personalized_baseline(
+    db: &DatabaseHandler,
+    current_cycle_start: NaiveDateTime,
+) -> anyhow::Result<f64> {
+    use openwhoop_algos::sleep_staging::NEED_BASELINE_WINDOW_NIGHTS;
+    let window_start =
+        current_cycle_start - TimeDelta::days(NEED_BASELINE_WINDOW_NIGHTS as i64);
+    let recent = db.get_sleep_cycle_models(Some(window_start)).await?;
+    let recent: Vec<&sleep_cycles::Model> = recent
+        .iter()
+        .filter(|c| c.end < current_cycle_start)
+        .collect();
+
+    let mut baseline_nights: Vec<BaselineNight> = Vec::new();
+    for cycle in recent.iter().rev().take(NEED_BASELINE_WINDOW_NIGHTS) {
+        let actual = cycle
+            .light_minutes
+            .zip(cycle.deep_minutes)
+            .zip(cycle.rem_minutes)
+            .map(|((l, d), r)| (l + d + r) / 60.0)
+            .unwrap_or_else(|| cycle.score.unwrap_or(0.0) / 100.0 * 8.0);
+        baseline_nights.push(BaselineNight {
+            actual_sleep_hours: actual,
+            sleep_efficiency_pct: cycle.sleep_efficiency.unwrap_or(0.0),
+            day_strain: 0.0,
+            had_nap: false,
+        });
+    }
+    Ok(personalized_baseline_hours(&baseline_nights))
 }
 
 /// Recompute and persist the user baseline if >24 h have elapsed
