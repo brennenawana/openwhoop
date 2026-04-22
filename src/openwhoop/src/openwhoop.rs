@@ -1,11 +1,15 @@
 use btleplug::api::ValueNotification;
 use chrono::{DateTime, Local, NaiveDateTime, TimeDelta, Utc};
-use openwhoop_entities::packets;
-use openwhoop_db::{DatabaseHandler, SearchHistory};
 use openwhoop_codec::{
     Activity, HistoryReading, WhoopData, WhoopPacket,
-    constants::{CMD_FROM_STRAP, CommandNumber, DATA_FROM_STRAP, EVENTS_FROM_STRAP, MetadataType},
+    constants::{
+        CMD_FROM_STRAP_GEN4, CMD_FROM_STRAP_GEN5, CommandNumber, DATA_FROM_STRAP_GEN4,
+        DATA_FROM_STRAP_GEN5, EVENTS_FROM_STRAP_GEN4, EVENTS_FROM_STRAP_GEN5, MetadataType,
+        WhoopGeneration,
+    },
 };
+use openwhoop_db::{DatabaseHandler, SearchHistory};
+use openwhoop_entities::packets;
 
 use crate::{
     algo::{
@@ -56,16 +60,18 @@ pub struct OpenWhoop {
     pub last_history_packet: Option<HistoryReading>,
     pub history_packets: Vec<HistoryReading>,
     pub history_complete: bool,
+    pub generation: WhoopGeneration,
 }
 
 impl OpenWhoop {
-    pub fn new(database: DatabaseHandler) -> Self {
+    pub fn new(database: DatabaseHandler, generation: WhoopGeneration) -> Self {
         Self {
             database,
             packet: None,
             last_history_packet: None,
             history_packets: Vec::new(),
             history_complete: false,
+            generation,
         }
     }
 
@@ -85,12 +91,20 @@ impl OpenWhoop {
         &mut self,
         packet: packets::Model,
     ) -> anyhow::Result<Option<WhoopPacket>> {
-        let data = match packet.uuid {
-            DATA_FROM_STRAP => {
-                let packet = if let Some(mut whoop_packet) = self.packet.take() {
-                    // TODO: maybe not needed but it would be nice to handle packet length here
-                    // so if next packet contains end of one and start of another it is handled
+        let parse_packet = match self.generation {
+            WhoopGeneration::Placeholder => todo!(),
+            WhoopGeneration::Gen4 => WhoopPacket::from_data,
+            WhoopGeneration::Gen5 => WhoopPacket::from_data_maverick,
+        };
+        let data_from_packet = match self.generation {
+            WhoopGeneration::Placeholder => todo!(),
+            WhoopGeneration::Gen4 => WhoopData::from_packet_gen4,
+            WhoopGeneration::Gen5 => WhoopData::from_packet_gen5,
+        };
 
+        let data = match packet.uuid {
+            DATA_FROM_STRAP_GEN4 | DATA_FROM_STRAP_GEN5 => {
+                let packet = if let Some(mut whoop_packet) = self.packet.take() {
                     whoop_packet.data.extend_from_slice(&packet.bytes);
 
                     if whoop_packet.data.len() + 3 >= whoop_packet.size {
@@ -100,7 +114,7 @@ impl OpenWhoop {
                         return Ok(None);
                     }
                 } else {
-                    let packet = WhoopPacket::from_data(packet.bytes)?;
+                    let packet = parse_packet(packet.bytes)?;
                     if packet.partial {
                         self.packet = Some(packet);
                         return Ok(None);
@@ -108,28 +122,32 @@ impl OpenWhoop {
                     packet
                 };
 
-                let Ok(data) = WhoopData::from_packet(packet) else {
-                    return Ok(None);
-                };
-                data
+                match data_from_packet(packet) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        trace!(target: "handle_packet", "DATA unhandled: {}", e);
+                        return Ok(None);
+                    }
+                }
             }
-            CMD_FROM_STRAP => {
-                let packet = WhoopPacket::from_data(packet.bytes)?;
-
-                let Ok(data) = WhoopData::from_packet(packet) else {
-                    return Ok(None);
-                };
-
-                data
+            CMD_FROM_STRAP_GEN4 | CMD_FROM_STRAP_GEN5 => {
+                let packet = parse_packet(packet.bytes)?;
+                match data_from_packet(packet) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        trace!(target: "handle_packet", "CMD unhandled: {}", e);
+                        return Ok(None);
+                    }
+                }
             }
-            EVENTS_FROM_STRAP => {
+            EVENTS_FROM_STRAP_GEN4 | EVENTS_FROM_STRAP_GEN5 => {
                 // EVENTS_FROM_STRAP carries the same packet wire format as
                 // DATA/CMD but was previously dropped in this match. Routing
                 // it through the existing parser produces `WhoopData::Event`,
                 // `UnknownEvent`, or `RunAlarm`, which handle_data now writes
                 // to the events table.
                 let packet = WhoopPacket::from_data(packet.bytes)?;
-                let Ok(data) = WhoopData::from_packet(packet) else {
+                let Ok(data) = WhoopData::from_packet(packet, self.generation) else {
                     return Ok(None);
                 };
                 data
@@ -167,7 +185,7 @@ impl OpenWhoop {
 
                 self.history_packets.push(hr);
             }
-            WhoopData::HistoryMetadata { data, cmd, .. } => match cmd {
+            WhoopData::HistoryMetadata { end_data, cmd, .. } => match cmd {
                 MetadataType::HistoryComplete => {
                     if !self.history_packets.is_empty() {
                         self.database
@@ -196,7 +214,7 @@ impl OpenWhoop {
                         return Ok(None);
                     }
 
-                    let packet = WhoopPacket::history_end(data);
+                    let packet = WhoopPacket::history_end(end_data);
                     return Ok(Some(packet));
                 }
             },
@@ -246,6 +264,7 @@ impl OpenWhoop {
                 let name = format!("Unknown({})", event);
                 let _ = self.database.create_event(ts, id, &name, None).await;
             }
+            WhoopData::CommandResponse(_) => {}
             WhoopData::VersionInfo { harvard, boylston } => {
                 info!("version harvard {} boylston {}", harvard, boylston);
                 let now = Local::now().naive_local();
@@ -254,7 +273,15 @@ impl OpenWhoop {
                     .create_device_info(now, Some(harvard), Some(boylston), None)
                     .await;
             }
-            _ => {}
+            WhoopData::HistoryReading(_) => {}
+            WhoopData::RealtimeHr { unix, bpm } => {
+                info!(target: "RealtimeHr", "time: {}, bpm: {}", unix, bpm);
+            }
+            // Command-response variants are consumed in-line by the
+            // callers that asked for them (get_battery, get_hello);
+            // nothing to persist here.
+            WhoopData::BatteryLevel { .. } => {}
+            WhoopData::HelloHarvard { .. } => {}
         }
 
         Ok(None)

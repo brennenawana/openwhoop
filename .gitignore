@@ -1,6 +1,7 @@
 /target
 .env
-db.sqlite
-db.sqlite-journal
+*.sqlite
+*.sqlite-journal
 /firmware
+/captures
 .DS_Store
