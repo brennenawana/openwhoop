@@ -315,8 +315,14 @@ where
         }
     }
 
+    // `&mut self` (not `&self`) so the Future captures `&mut Gen5HistorySync`
+    // instead of `&Gen5HistorySync` across the `.await` below. `&T: Send`
+    // requires `T: Sync`; `&mut T: Send` only requires `T: Send`. btleplug
+    // 0.12's notification stream is `Send` but not `Sync`, so holding any
+    // `&self` across an await point in this impl would require the struct
+    // to be `Sync` — which the stream field makes impossible.
     async fn decode_notification(
-        &self,
+        &mut self,
         notification: ValueNotification,
     ) -> anyhow::Result<Option<WhoopPacket>> {
         let packet = self.device.notification_to_model(notification).await?;
