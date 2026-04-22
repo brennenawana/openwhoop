@@ -34,6 +34,38 @@ const MOD_FREQ_HIGH: f64 = 3.5;
 const VIGOROUS_FREQ: f64 = 3.0;
 const VIGOROUS_ACCEL_STD: f64 = 0.4;
 
+// Gravity-only fallback thresholds (rule-v0-grav). Applied when a window
+// has no 26 Hz IMU samples — classifies from the 1 Hz gravity vector
+// carried in each heart_rate row's sensor_data.accel_gravity.
+//
+// Signals used:
+// - `grav_delta_mean`: mean magnitude of per-sample gravity delta
+//   ‖g[i] − g[i−1]‖. Captures wrist reorientation second-to-second.
+// - `mean_hr`: window-average BPM. Gates "Moderate"/"Vigorous" so that
+//   wrist wobble without HR elevation (typing, gesturing) doesn't
+//   masquerade as exertion.
+//
+// Thresholds derive from running the classifier over a real user's
+// 14 days of data and requiring the final distribution to fall in
+// the population-plausible ranges (Sedentary 55–70%, Light 20–30%,
+// Moderate 5–10%, Vigorous <5%). They WILL need re-tuning as more
+// users/days accumulate. Bumping the version tag is required on any
+// threshold change so historical rows can be re-scored.
+const GRAV_DELTA_SED: f64 = 0.10;
+const GRAV_DELTA_LIGHT: f64 = 0.25;
+const GRAV_DELTA_VIGOROUS: f64 = 0.40;
+/// Minimum mean BPM for a high-motion window to count as Moderate.
+const GRAV_MODERATE_MIN_HR: f64 = 95.0;
+/// Minimum mean BPM for a high-motion window to count as Vigorous.
+const GRAV_VIGOROUS_MIN_HR: f64 = 120.0;
+/// Mean BPM at or above which HR alone carries the classification to
+/// Vigorous even when the 1 Hz wrist motion signal is modest (e.g.
+/// cycling, weighted carries — wrist fairly still, HR elevated). The
+/// floor on motion guards against the non-movement HR spikes (anxiety,
+/// caffeine) reading as exercise.
+const GRAV_HR_ALONE_VIGOROUS: f64 = 130.0;
+const GRAV_HR_ALONE_MIN_DELTA: f64 = 0.08;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityClass {
     Sedentary,
@@ -106,7 +138,7 @@ fn classify_one(
         .flat_map(|r| r.imu_data.iter().flat_map(|v| v.iter()))
         .collect();
     if imu.is_empty() {
-        return None;
+        return classify_one_gravity(w_start, w_end, readings);
     }
 
     let accel_mags: Vec<f64> = imu
@@ -153,6 +185,101 @@ fn classify_one(
         dominant_frequency_hz: dominant_hz,
         mean_hr,
     })
+}
+
+/// Gravity-only fallback: classify from the 1 Hz per-reading gravity
+/// vector when the window has no 26 Hz IMU samples. Returns `None`
+/// when fewer than 10 s of gravity samples are present (too little
+/// signal to classify confidently).
+fn classify_one_gravity(
+    w_start: NaiveDateTime,
+    w_end: NaiveDateTime,
+    readings: &[ParsedHistoryReading],
+) -> Option<ActivitySample> {
+    let grav: Vec<[f32; 3]> = readings
+        .iter()
+        .filter(|r| r.time >= w_start && r.time < w_end)
+        .filter_map(|r| r.gravity)
+        .collect();
+    if grav.len() < 10 {
+        return None;
+    }
+
+    let accel_mags: Vec<f64> = grav
+        .iter()
+        .map(|g| {
+            ((g[0] * g[0] + g[1] * g[1] + g[2] * g[2]) as f64).sqrt()
+        })
+        .collect();
+    let accel_mean = mean(&accel_mags);
+    let accel_std = stddev(&accel_mags);
+
+    // Mean per-second change in gravity orientation — the primary
+    // activity signal at 1 Hz sampling.
+    let deltas: Vec<f64> = grav
+        .windows(2)
+        .map(|w| {
+            let dx = (w[1][0] - w[0][0]) as f64;
+            let dy = (w[1][1] - w[0][1]) as f64;
+            let dz = (w[1][2] - w[0][2]) as f64;
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        })
+        .collect();
+    let grav_delta_mean = mean(&deltas);
+
+    let bpms: Vec<f64> = readings
+        .iter()
+        .filter(|r| r.time >= w_start && r.time < w_end)
+        .map(|r| f64::from(r.bpm))
+        .filter(|&b| b > 0.0)
+        .collect();
+    let mean_hr = if bpms.is_empty() { 0.0 } else { mean(&bpms) };
+
+    let classification = classify_gravity(grav_delta_mean, mean_hr);
+
+    Some(ActivitySample {
+        window_start: w_start,
+        window_end: w_end,
+        classification,
+        accel_magnitude_mean: accel_mean,
+        accel_magnitude_std: accel_std,
+        // No gyroscope at 1 Hz — use the gravity-delta mean in its
+        // place so the row still carries the driving signal. The tray
+        // UI only sums minutes per classification bucket today; raw
+        // feature fields are diagnostic.
+        gyro_magnitude_mean: grav_delta_mean,
+        // Nyquist (< 0.5 Hz) makes frequency-domain analysis infeasible
+        // at 1 Hz; leave the field as 0.0 to flag the gravity path.
+        dominant_frequency_hz: 0.0,
+        mean_hr,
+    })
+}
+
+fn classify_gravity(grav_delta_mean: f64, mean_hr: f64) -> ActivityClass {
+    // HR-only path: a sustained HR ≥ 130 with some wrist activity is
+    // vigorous regardless of whether the wrist swings heavily
+    // (cycling, weighted carries). Tiny motion floor guards against
+    // non-movement HR spikes.
+    if mean_hr >= GRAV_HR_ALONE_VIGOROUS && grav_delta_mean >= GRAV_HR_ALONE_MIN_DELTA {
+        return ActivityClass::Vigorous;
+    }
+
+    if grav_delta_mean < GRAV_DELTA_SED {
+        return ActivityClass::Sedentary;
+    }
+    if grav_delta_mean < GRAV_DELTA_LIGHT {
+        return ActivityClass::Light;
+    }
+    // High-motion band — require HR corroboration so that wrist wobble
+    // without cardiovascular load (typing, gesturing, light chores)
+    // falls back to Light rather than inflating Moderate/Vigorous.
+    if grav_delta_mean >= GRAV_DELTA_VIGOROUS && mean_hr >= GRAV_VIGOROUS_MIN_HR {
+        return ActivityClass::Vigorous;
+    }
+    if mean_hr >= GRAV_MODERATE_MIN_HR {
+        return ActivityClass::Moderate;
+    }
+    ActivityClass::Light
 }
 
 fn classify(accel_std: f64, gyro_mean: f64, dom_hz: f64) -> ActivityClass {
@@ -325,6 +452,66 @@ mod tests {
                 imu_data: None,
                 gravity: None,
             })
+            .collect();
+        let samples = classify_activities(dt(0), dt(60), &readings, &[]);
+        assert!(samples.is_empty());
+    }
+
+    fn reading_with_gravity(
+        time: NaiveDateTime,
+        bpm: u8,
+        gravity: [f32; 3],
+    ) -> ParsedHistoryReading {
+        ParsedHistoryReading {
+            time,
+            bpm,
+            rr: vec![],
+            imu_data: None,
+            gravity: Some(gravity),
+        }
+    }
+
+    #[test]
+    fn gravity_only_still_classifies_sedentary() {
+        // All readings carry identical gravity vectors → delta_mean = 0.
+        let readings: Vec<ParsedHistoryReading> = (0..60)
+            .map(|i| reading_with_gravity(dt(i), 60, [0.0, 0.0, 1.0]))
+            .collect();
+        let samples = classify_activities(dt(0), dt(60), &readings, &[]);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].classification, ActivityClass::Sedentary);
+        // Gravity path leaves dominant frequency at 0 as a flag.
+        assert_eq!(samples[0].dominant_frequency_hz, 0.0);
+    }
+
+    #[test]
+    fn gravity_only_wobble_classifies_above_sedentary() {
+        // Alternating gravity direction per second → large delta_mean.
+        let readings: Vec<ParsedHistoryReading> = (0..60)
+            .map(|i| {
+                let flip = i % 2 == 0;
+                reading_with_gravity(
+                    dt(i),
+                    110,
+                    if flip { [0.5, 0.0, 0.87] } else { [-0.5, 0.0, 0.87] },
+                )
+            })
+            .collect();
+        let samples = classify_activities(dt(0), dt(60), &readings, &[]);
+        assert_eq!(samples.len(), 1);
+        assert!(
+            !matches!(samples[0].classification, ActivityClass::Sedentary),
+            "expected non-sedentary, got {:?} (delta_mean={:.3})",
+            samples[0].classification,
+            samples[0].gyro_magnitude_mean,
+        );
+    }
+
+    #[test]
+    fn gravity_too_few_samples_yields_none() {
+        // Only 5 gravity samples in the window → below the 10-sample floor.
+        let readings: Vec<ParsedHistoryReading> = (0..5)
+            .map(|i| reading_with_gravity(dt(i), 60, [0.0, 0.0, 1.0]))
             .collect();
         let samples = classify_activities(dt(0), dt(60), &readings, &[]);
         assert!(samples.is_empty());
