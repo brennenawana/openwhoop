@@ -522,23 +522,40 @@ impl OpenWhoop {
             .last()
             .map(|c| f64::from(c.min_bpm))
             .unwrap_or(60.0);
+        // Long wear periods (e.g. multi-day continuous wear) can hold
+        // hundreds of thousands of HR rows. Loading them all at once was
+        // observed to wedge the tray's sync before any samples could be
+        // inserted. Chunk into 24h slices aligned to the 5-minute HRV
+        // window step so no window is split across chunks.
+        const CHUNK_HOURS: i64 = 24;
         let mut total = 0usize;
         for wp in &wear_periods {
-            let readings = self
-                .database
-                .search_history(SearchHistory {
-                    from: Some(wp.start),
-                    to: Some(wp.end),
-                    limit: None,
-                })
-                .await?;
-            let samples = compute_daytime_hrv(wp.start, wp.end, &readings, &sleep_windows, resting_hr);
-            for s in &samples {
-                if let Err(e) = self.database.create_hrv_sample(s).await {
-                    log::warn!("failed to persist hrv sample: {e:#}");
+            let mut cursor = wp.start;
+            while cursor < wp.end {
+                let chunk_end = (cursor + TimeDelta::hours(CHUNK_HOURS)).min(wp.end);
+                let readings = self
+                    .database
+                    .search_history(SearchHistory {
+                        from: Some(cursor),
+                        to: Some(chunk_end),
+                        limit: None,
+                    })
+                    .await?;
+                let samples = compute_daytime_hrv(
+                    cursor,
+                    chunk_end,
+                    &readings,
+                    &sleep_windows,
+                    resting_hr,
+                );
+                for s in &samples {
+                    if let Err(e) = self.database.create_hrv_sample(s).await {
+                        log::warn!("failed to persist hrv sample: {e:#}");
+                    }
                 }
+                total += samples.len();
+                cursor = chunk_end;
             }
-            total += samples.len();
         }
         info!("daytime hrv: {} samples across {} wear periods", total, wear_periods.len());
         Ok(())
@@ -572,23 +589,33 @@ impl OpenWhoop {
         let sleep_cycles = self.database.get_sleep_cycles(Some(window_start)).await?;
         let sleep_windows: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> =
             sleep_cycles.iter().map(|c| (c.start, c.end)).collect();
+        // Same chunking rationale as compute_daytime_hrv — a single
+        // 5-day wear_period with 366k HR rows was observed to wedge
+        // the pipeline mid-insert, leaving the DB partially populated.
+        // 24h chunks align to the 1-minute activity window step.
+        const CHUNK_HOURS: i64 = 24;
         let mut total = 0usize;
         for wp in &wear_periods {
-            let readings = self
-                .database
-                .search_history(SearchHistory {
-                    from: Some(wp.start),
-                    to: Some(wp.end),
-                    limit: None,
-                })
-                .await?;
-            let samples = classify_activities(wp.start, wp.end, &readings, &sleep_windows);
-            for s in &samples {
-                if let Err(e) = self.database.create_activity_sample(s).await {
-                    log::warn!("failed to persist activity sample: {e:#}");
+            let mut cursor = wp.start;
+            while cursor < wp.end {
+                let chunk_end = (cursor + TimeDelta::hours(CHUNK_HOURS)).min(wp.end);
+                let readings = self
+                    .database
+                    .search_history(SearchHistory {
+                        from: Some(cursor),
+                        to: Some(chunk_end),
+                        limit: None,
+                    })
+                    .await?;
+                let samples = classify_activities(cursor, chunk_end, &readings, &sleep_windows);
+                for s in &samples {
+                    if let Err(e) = self.database.create_activity_sample(s).await {
+                        log::warn!("failed to persist activity sample: {e:#}");
+                    }
                 }
+                total += samples.len();
+                cursor = chunk_end;
             }
-            total += samples.len();
         }
         info!("activity classification: {} samples across {} wear periods", total, wear_periods.len());
         Ok(())
