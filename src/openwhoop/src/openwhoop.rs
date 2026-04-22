@@ -417,6 +417,7 @@ impl OpenWhoop {
     }
 
     /// Feature 4: derive wear periods for the last 14 days from the
+    /// Recompute wear periods for the last 14 days from the
     /// events table (WristOn/Off) + heart_rate.sensor_data skin_contact.
     /// Idempotency: deletes existing wear_periods rows in the range
     /// before inserting fresh. Safe to re-run.
@@ -437,6 +438,15 @@ impl OpenWhoop {
             .unwrap_or_default();
         let periods = derive_wear_periods(&events, &runs, window_start, window_end);
         info!("wear_periods: derived {} periods", periods.len());
+        match self
+            .database
+            .delete_wear_periods_in_range(window_start, window_end)
+            .await
+        {
+            Ok(n) if n > 0 => info!("wear_periods: cleared {n} stale rows before reinsert"),
+            Ok(_) => {}
+            Err(e) => log::warn!("failed to clear stale wear_periods: {e:#}"),
+        }
         for p in &periods {
             if let Err(e) = self.database.create_wear_period(p).await {
                 log::warn!("failed to persist wear period: {e:#}");

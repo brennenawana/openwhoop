@@ -38,3 +38,9 @@ pub(crate) mod activity_classifier;
 pub use activity_classifier::{
     ACTIVITY_CLASSIFIER_VERSION, ActivityClass, ActivitySample, classify_activities,
 };
+
+pub mod recovery;
+pub use recovery::{
+    BASELINE_WINDOW_NIGHTS as RECOVERY_BASELINE_WINDOW_NIGHTS, RecoveryBand, RecoveryDriver,
+    RecoveryNight, RecoveryScore, RecoveryZ, age_normed_hrv_score, compute_recovery,
+};

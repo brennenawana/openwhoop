@@ -98,6 +98,23 @@ impl DatabaseHandler {
         Ok(())
     }
 
+    /// Delete all wear_periods rows that overlap `[start, end]`. Used by
+    /// [`update_wear_periods`] to make re-runs idempotent; without this,
+    /// every sync appended a new copy of each period and downstream
+    /// range sums over-counted by a growing multiple.
+    pub async fn delete_wear_periods_in_range(
+        &self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    ) -> anyhow::Result<u64> {
+        let res = wear_periods::Entity::delete_many()
+            .filter(wear_periods::Column::End.gte(start))
+            .filter(wear_periods::Column::Start.lte(end))
+            .exec(&self.db)
+            .await?;
+        Ok(res.rows_affected)
+    }
+
     /// Wear periods overlapping a range. Used by downstream
     /// pipeline steps (daytime HRV, activity classifier) to gate
     /// window inclusion.
@@ -114,21 +131,34 @@ impl DatabaseHandler {
             .await?)
     }
 
-    /// Sum wear minutes over a date range — snapshot field.
+    /// Sum wear minutes that fall inside `[start, end]`. Each intersecting
+    /// wear period contributes only its overlap with the query range, not
+    /// its full duration — so a wear period that spans multiple calendar
+    /// days is prorated correctly when callers ask for a single day.
     pub async fn wear_minutes_in_range(
         &self,
         start: NaiveDateTime,
         end: NaiveDateTime,
     ) -> anyhow::Result<f64> {
-        let rows: Vec<f64> = wear_periods::Entity::find()
+        let rows: Vec<(NaiveDateTime, NaiveDateTime)> = wear_periods::Entity::find()
             .filter(wear_periods::Column::End.gte(start))
             .filter(wear_periods::Column::Start.lte(end))
             .select_only()
-            .column(wear_periods::Column::DurationMinutes)
+            .column(wear_periods::Column::Start)
+            .column(wear_periods::Column::End)
             .into_tuple()
             .all(&self.db)
             .await?;
-        Ok(rows.iter().sum())
+        let total: f64 = rows
+            .into_iter()
+            .map(|(s, e)| {
+                let clamped_start = s.max(start);
+                let clamped_end = e.min(end);
+                let delta = clamped_end - clamped_start;
+                (delta.num_seconds() as f64 / 60.0).max(0.0)
+            })
+            .sum();
+        Ok(total)
     }
 
     pub fn wear_source_from_str(s: &str) -> WearSource {
@@ -211,5 +241,82 @@ mod tests {
             .await
             .unwrap();
         assert!((total - 75.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn wear_minutes_in_range_prorates_multi_day_period() {
+        // One period spans 72h total; queryig one 24h window must return
+        // ~1440 min, not the full 4320 min of the row.
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+        let start = dt();
+        let end = dt() + chrono::Duration::hours(72);
+        db.create_wear_period(&WearPeriod {
+            start,
+            end,
+            source: WearSource::Events,
+        })
+        .await
+        .unwrap();
+
+        // Query only the second calendar day.
+        let q_start = dt() + chrono::Duration::hours(24);
+        let q_end = dt() + chrono::Duration::hours(48);
+        let total = db.wear_minutes_in_range(q_start, q_end).await.unwrap();
+        assert!(
+            (total - 24.0 * 60.0).abs() < 1e-6,
+            "expected ~1440 min for a single-day slice of a 3-day period, got {total}",
+        );
+    }
+
+    #[tokio::test]
+    async fn wear_minutes_in_range_handles_partial_overlap() {
+        // Period: [0h, 6h]. Query: [4h, 10h]. Overlap: 2h = 120 min.
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+        db.create_wear_period(&WearPeriod {
+            start: dt(),
+            end: dt() + chrono::Duration::hours(6),
+            source: WearSource::Events,
+        })
+        .await
+        .unwrap();
+        let total = db
+            .wear_minutes_in_range(
+                dt() + chrono::Duration::hours(4),
+                dt() + chrono::Duration::hours(10),
+            )
+            .await
+            .unwrap();
+        assert!((total - 120.0).abs() < 1e-6, "got {total}");
+    }
+
+    #[tokio::test]
+    async fn delete_wear_periods_in_range_removes_overlapping_rows() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+        // One inside the range, one outside.
+        db.create_wear_period(&WearPeriod {
+            start: dt(),
+            end: dt() + chrono::Duration::hours(2),
+            source: WearSource::Events,
+        })
+        .await
+        .unwrap();
+        db.create_wear_period(&WearPeriod {
+            start: dt() + chrono::Duration::days(5),
+            end: dt() + chrono::Duration::days(5) + chrono::Duration::hours(2),
+            source: WearSource::Events,
+        })
+        .await
+        .unwrap();
+
+        let deleted = db
+            .delete_wear_periods_in_range(dt() - chrono::Duration::hours(1), dt() + chrono::Duration::hours(3))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = db
+            .get_wear_periods_overlapping(dt() - chrono::Duration::days(1), dt() + chrono::Duration::days(10))
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
     }
 }
