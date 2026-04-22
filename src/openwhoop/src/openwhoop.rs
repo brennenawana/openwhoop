@@ -382,7 +382,16 @@ impl OpenWhoop {
     /// Errors in a single cycle do not halt the pipeline — they mark
     /// the offending cycle as failed and the run continues.
     pub async fn stage_sleep(&self) -> anyhow::Result<()> {
-        let result = crate::sleep_staging::stage_unclassified(&self.database).await?;
+        self.stage_sleep_with_opts(crate::sleep_staging::StageSleepOptions::default())
+            .await
+    }
+
+    pub async fn stage_sleep_with_opts(
+        &self,
+        opts: crate::sleep_staging::StageSleepOptions,
+    ) -> anyhow::Result<()> {
+        let result =
+            crate::sleep_staging::stage_unclassified_with_opts(&self.database, opts).await?;
         info!(
             "sleep staging: considered={} succeeded={} failed={} baseline_refreshed={}",
             result.cycles_considered,

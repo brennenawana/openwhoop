@@ -26,6 +26,15 @@ pub struct StageResult {
     pub baseline_refreshed: bool,
 }
 
+/// Options controlling sleep-need scoring behavior during staging.
+/// Tray / CLI callers construct this from persisted user settings.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StageSleepOptions {
+    /// Enable Rupp 2009 "banking" — recent sleep surplus reduces
+    /// tonight's need. WHOOP does not expose this; default off.
+    pub allow_surplus_banking: bool,
+}
+
 /// Snapshot of last night's sleep for the Tauri tray app. All fields
 /// derive from the persisted `sleep_cycles` row and its epochs — the
 /// front-end builds its own display struct from this payload.
@@ -205,8 +214,16 @@ fn recompute_components(cycle: &sleep_cycles::Model) -> Option<ScoreComponentsBr
 /// Run the staging pipeline for every unstaged sleep cycle, then
 /// refresh the user baseline if stale. Safe to call on every sync.
 pub async fn stage_unclassified(db: &DatabaseHandler) -> anyhow::Result<StageResult> {
+    stage_unclassified_with_opts(db, StageSleepOptions::default()).await
+}
+
+/// Like [`stage_unclassified`] but with scoring options from caller.
+pub async fn stage_unclassified_with_opts(
+    db: &DatabaseHandler,
+    opts: StageSleepOptions,
+) -> anyhow::Result<StageResult> {
     let cycles = db.get_unstaged_sleep_cycles().await?;
-    let mut result = stage_cycles(db, &cycles).await?;
+    let mut result = stage_cycles(db, &cycles, opts).await?;
     result.baseline_refreshed = refresh_baseline_if_stale(db).await?;
     Ok(result)
 }
@@ -216,6 +233,7 @@ pub async fn stage_unclassified(db: &DatabaseHandler) -> anyhow::Result<StageRes
 pub async fn stage_cycles(
     db: &DatabaseHandler,
     cycles: &[sleep_cycles::Model],
+    opts: StageSleepOptions,
 ) -> anyhow::Result<StageResult> {
     let baseline = load_user_baseline(db).await?;
     let mut result = StageResult {
@@ -224,7 +242,7 @@ pub async fn stage_cycles(
     };
 
     for cycle in cycles {
-        match stage_one_cycle(db, cycle, &baseline).await {
+        match stage_one_cycle(db, cycle, &baseline, opts).await {
             Ok(()) => result.cycles_succeeded += 1,
             Err(e) => {
                 log::error!(
@@ -257,12 +275,21 @@ pub async fn reclassify_range(
     from: NaiveDateTime,
     to: NaiveDateTime,
 ) -> anyhow::Result<StageResult> {
+    reclassify_range_with_opts(db, from, to, StageSleepOptions::default()).await
+}
+
+pub async fn reclassify_range_with_opts(
+    db: &DatabaseHandler,
+    from: NaiveDateTime,
+    to: NaiveDateTime,
+    opts: StageSleepOptions,
+) -> anyhow::Result<StageResult> {
     let cycles = db.get_sleep_cycles_in_range(from, to).await?;
     for cycle in &cycles {
         db.delete_sleep_epochs_for_cycle(cycle.id).await?;
         db.reset_cycle_staging_fields(cycle.id).await?;
     }
-    let mut result = stage_cycles(db, &cycles).await?;
+    let mut result = stage_cycles(db, &cycles, opts).await?;
     result.baseline_refreshed = refresh_baseline(db, true).await?;
     Ok(result)
 }
@@ -292,6 +319,7 @@ async fn stage_one_cycle(
     db: &DatabaseHandler,
     cycle: &sleep_cycles::Model,
     baseline: &UserBaseline,
+    opts: StageSleepOptions,
 ) -> anyhow::Result<()> {
     // 1. Fetch heart_rate rows inside the sleep window.
     let readings = db
@@ -331,10 +359,7 @@ async fn stage_one_cycle(
         rolling_7d_debt_hours: debt,
         rolling_7d_surplus_hours: surplus,
         nap_minutes,
-        // Surplus-banking is a user setting; default false matches
-        // WHOOP's user-facing behavior. A future config wire-up can
-        // override this per-user.
-        allow_surplus_banking: false,
+        allow_surplus_banking: opts.allow_surplus_banking,
     };
     let need = sleep_need_hours(&need_inputs);
 
