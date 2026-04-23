@@ -157,6 +157,40 @@ impl DatabaseHandler {
     }
 
     pub async fn create_sleep(&self, sleep: SleepCycle) -> anyhow::Result<()> {
+        // Look up any existing row first so we can detect whether this
+        // call extends a previously-staged cycle. If bounds change, the
+        // old epochs / stage minutes cover only part of the new window,
+        // so we must invalidate staging — otherwise `stage_unclassified`
+        // skips the row (it filters on `classifier_version IS NULL`) and
+        // the History view keeps showing the truncated stage totals.
+        let existing = sleep_cycles::Entity::find()
+            .filter(sleep_cycles::Column::SleepId.eq(sleep.id))
+            .one(&self.db)
+            .await?;
+
+        if let Some(row) = existing {
+            let bounds_changed = row.start != sleep.start || row.end != sleep.end;
+            let upd = sleep_cycles::ActiveModel {
+                id: Set(row.id),
+                start: Set(sleep.start),
+                end: Set(sleep.end),
+                min_bpm: Set(sleep.min_bpm.into()),
+                max_bpm: Set(sleep.max_bpm.into()),
+                avg_bpm: Set(sleep.avg_bpm.into()),
+                min_hrv: Set(sleep.min_hrv.into()),
+                max_hrv: Set(sleep.max_hrv.into()),
+                avg_hrv: Set(sleep.avg_hrv.into()),
+                ..Default::default()
+            };
+            upd.update(&self.db).await?;
+
+            if bounds_changed {
+                self.delete_sleep_epochs_for_cycle(row.id).await?;
+                self.reset_cycle_staging_fields(row.id).await?;
+            }
+            return Ok(());
+        }
+
         let model = sleep_cycles::ActiveModel {
             id: Set(Uuid::new_v4()),
             sleep_id: Set(sleep.id),
@@ -172,24 +206,7 @@ impl DatabaseHandler {
             synced: NotSet,
             ..Default::default()
         };
-
-        let _r = sleep_cycles::Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(sleep_cycles::Column::SleepId)
-                    .update_columns([
-                        sleep_cycles::Column::Start,
-                        sleep_cycles::Column::End,
-                        sleep_cycles::Column::MinBpm,
-                        sleep_cycles::Column::MaxBpm,
-                        sleep_cycles::Column::AvgBpm,
-                        sleep_cycles::Column::MinHrv,
-                        sleep_cycles::Column::MaxHrv,
-                        sleep_cycles::Column::AvgHrv,
-                    ])
-                    .to_owned(),
-            )
-            .exec(&self.db)
-            .await?;
+        sleep_cycles::Entity::insert(model).exec(&self.db).await?;
 
         Ok(())
     }
@@ -307,6 +324,158 @@ mod tests {
         let latest = latest.unwrap();
         assert_eq!(latest.min_bpm, 50);
         assert_eq!(latest.avg_bpm, 60);
+    }
+
+    #[tokio::test]
+    async fn extending_sleep_bounds_invalidates_staging() {
+        use openwhoop_entities::sleep_epochs;
+
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 4, 22)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let initial_end = start + chrono::TimeDelta::hours(2);
+        let extended_end = start + chrono::TimeDelta::hours(8);
+
+        let sleep = SleepCycle {
+            id: initial_end.date(),
+            start,
+            end: initial_end,
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 85.0,
+        };
+        db.create_sleep(sleep).await.unwrap();
+
+        // Simulate a staging run: populate classifier_version, stage
+        // totals, and a couple of epoch rows.
+        let cycle_id = sleep_cycles::Entity::find()
+            .one(&db.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        sleep_cycles::ActiveModel {
+            id: sea_orm::ActiveValue::Unchanged(cycle_id),
+            classifier_version: Set(Some("rule-v2".to_string())),
+            awake_minutes: Set(Some(5.0)),
+            light_minutes: Set(Some(80.0)),
+            deep_minutes: Set(Some(15.0)),
+            rem_minutes: Set(Some(20.0)),
+            performance_score: Set(Some(72.0)),
+            ..Default::default()
+        }
+        .update(&db.db)
+        .await
+        .unwrap();
+        sleep_epochs::ActiveModel {
+            id: NotSet,
+            sleep_cycle_id: Set(cycle_id),
+            epoch_start: Set(start),
+            epoch_end: Set(start + chrono::TimeDelta::seconds(30)),
+            stage: Set("Light".to_string()),
+            classifier_version: Set("rule-v2".to_string()),
+            ..Default::default()
+        }
+        .insert(&db.db)
+        .await
+        .unwrap();
+
+        // Re-insert with the same sleep_id but an extended end. This
+        // mirrors what happens when a later sync pulls in the rest of
+        // the night.
+        let extended = SleepCycle {
+            id: initial_end.date(),
+            start,
+            end: extended_end,
+            min_bpm: 48,
+            max_bpm: 75,
+            avg_bpm: 61,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 85.0,
+        };
+        db.create_sleep(extended).await.unwrap();
+
+        let reloaded = sleep_cycles::Entity::find_by_id(cycle_id)
+            .one(&db.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.end, extended_end);
+        assert_eq!(reloaded.classifier_version, None, "staging must be invalidated when bounds change");
+        assert_eq!(reloaded.awake_minutes, None);
+        assert_eq!(reloaded.light_minutes, None);
+        assert_eq!(reloaded.deep_minutes, None);
+        assert_eq!(reloaded.rem_minutes, None);
+        assert_eq!(reloaded.performance_score, None);
+
+        let remaining_epochs = sleep_epochs::Entity::find()
+            .filter(sleep_epochs::Column::SleepCycleId.eq(cycle_id))
+            .all(&db.db)
+            .await
+            .unwrap();
+        assert!(remaining_epochs.is_empty(), "old epochs must be wiped");
+    }
+
+    #[tokio::test]
+    async fn idempotent_sleep_insert_preserves_staging() {
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 4, 22)
+            .unwrap()
+            .and_hms_opt(22, 0, 0)
+            .unwrap();
+        let end = start + chrono::TimeDelta::hours(8);
+
+        let sleep = SleepCycle {
+            id: end.date(),
+            start,
+            end,
+            min_bpm: 50,
+            max_bpm: 70,
+            avg_bpm: 60,
+            min_hrv: 30,
+            max_hrv: 80,
+            avg_hrv: 55,
+            score: 85.0,
+        };
+        db.create_sleep(sleep.clone()).await.unwrap();
+
+        let cycle_id = sleep_cycles::Entity::find()
+            .one(&db.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        sleep_cycles::ActiveModel {
+            id: sea_orm::ActiveValue::Unchanged(cycle_id),
+            classifier_version: Set(Some("rule-v2".to_string())),
+            light_minutes: Set(Some(300.0)),
+            ..Default::default()
+        }
+        .update(&db.db)
+        .await
+        .unwrap();
+
+        // Re-insert the same cycle (unchanged bounds). Staging fields
+        // should be preserved — otherwise every sync would redo work.
+        db.create_sleep(sleep).await.unwrap();
+
+        let reloaded = sleep_cycles::Entity::find_by_id(cycle_id)
+            .one(&db.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.classifier_version.as_deref(), Some("rule-v2"));
+        assert_eq!(reloaded.light_minutes, Some(300.0));
     }
 
     #[tokio::test]
