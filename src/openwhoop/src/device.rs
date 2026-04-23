@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use btleplug::{
     api::{Central, CharPropFlags, Characteristic, Peripheral as _, ValueNotification, WriteType},
     platform::{Adapter, Peripheral},
@@ -145,16 +145,36 @@ impl WhoopDevice {
         should_exit: Arc<AtomicBool>,
         config: HistorySyncConfig,
     ) -> anyhow::Result<()> {
-        match self.generation {
-            WhoopGeneration::Gen4 => self.sync_history_gen4(should_exit).await,
-            WhoopGeneration::Gen5 => self.sync_history_gen5(should_exit, config).await,
-            WhoopGeneration::Placeholder => Err(anyhow!(
-                "WhoopGeneration::Placeholder cannot be used for history sync"
-            )),
+        // Race the generation-specific sync loop against a connection-health
+        // monitor. btleplug's notification stream can stall indefinitely after
+        // a BLE disconnect without producing an error or stream-end, so the
+        // monitor is the backstop that forces a fast failure in that case.
+        let peripheral = self.peripheral.clone();
+        let monitor = async move { connection_monitor(peripheral).await };
+        tokio::pin!(monitor);
+
+        let generation = self.generation;
+        let sync = async {
+            match generation {
+                WhoopGeneration::Gen4 => self.sync_history_gen4(should_exit, config).await,
+                WhoopGeneration::Gen5 => self.sync_history_gen5(should_exit, config).await,
+                WhoopGeneration::Placeholder => Err(anyhow!(
+                    "WhoopGeneration::Placeholder cannot be used for history sync"
+                )),
+            }
+        };
+
+        tokio::select! {
+            result = sync => result,
+            err = &mut monitor => Err(err),
         }
     }
 
-    async fn sync_history_gen4(&mut self, should_exit: Arc<AtomicBool>) -> anyhow::Result<()> {
+    async fn sync_history_gen4(
+        &mut self,
+        should_exit: Arc<AtomicBool>,
+        config: HistorySyncConfig,
+    ) -> anyhow::Result<()> {
         let mut notifications = self.peripheral.notifications().await?;
 
         self.send_command(WhoopPacket::hello_harvard()).await?;
@@ -164,6 +184,7 @@ impl WhoopDevice {
             .await?;
         self.send_command(WhoopPacket::history_start()).await?;
 
+        let idle_timeout = config.idle_timeout;
         loop {
             if should_exit.load(Ordering::SeqCst) {
                 break;
@@ -173,11 +194,11 @@ impl WhoopDevice {
                 break;
             }
             tokio::select! {
-                _ = sleep(Duration::from_secs(10)) => {
-                    if self.on_sleep().await? {
-                        error!("Whoop disconnected");
-                    }
-                    break;
+                _ = sleep(idle_timeout) => {
+                    bail!(
+                        "No Gen4 history notifications for {}s (likely disconnect)",
+                        idle_timeout.as_secs()
+                    );
                 }
                 Some(notification) = notifications.next() => {
                     self.handle_sync_notification(notification).await?;
@@ -223,12 +244,7 @@ impl WhoopDevice {
         }
     }
 
-    async fn on_sleep(&mut self) -> anyhow::Result<bool> {
-        let is_connected = self.peripheral.is_connected().await?;
-        Ok(!is_connected)
-    }
-
-    /// Ring the device. Dispatches to the correct command for the generation:
+/// Ring the device. Dispatches to the correct command for the generation:
     /// - Gen4: RunAlarm (cmd=68)
     /// - Maverick: RunHapticPatternMaverick / WSBLE_CMD_HAPTICS_RUN_NTF (cmd=19, revision=0x01)
     pub async fn ring_alarm(&mut self) -> anyhow::Result<()> {
@@ -424,6 +440,39 @@ impl WhoopDevice {
             Ok(Some(pair)) => Ok(pair),
             Ok(None) => Err(anyhow!("notification stream ended before hello response")),
             Err(_) => Err(anyhow!("timed out waiting for hello response")),
+        }
+    }
+}
+
+/// Polls `peripheral.is_connected()` on a fixed cadence and resolves with an
+/// error when the peripheral is reported as disconnected — or when btleplug's
+/// own is_connected call hangs past our per-poll timeout. Used as the losing
+/// branch of a `tokio::select!` inside `sync_history` so BLE disconnects abort
+/// the sync within a few seconds instead of hanging on a silent notification
+/// stream.
+async fn connection_monitor(peripheral: Peripheral) -> anyhow::Error {
+    const POLL_INTERVAL: Duration = Duration::from_secs(3);
+    const PER_POLL_TIMEOUT: Duration = Duration::from_secs(2);
+
+    // Skip the first immediate tick so we don't race the initial connect.
+    let mut ticker = tokio::time::interval(POLL_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+        match timeout(PER_POLL_TIMEOUT, peripheral.is_connected()).await {
+            Ok(Ok(true)) => continue,
+            Ok(Ok(false)) => return anyhow!("peripheral disconnected during history sync"),
+            Ok(Err(err)) => {
+                return anyhow!("is_connected check failed during history sync: {err}");
+            }
+            Err(_) => {
+                return anyhow!(
+                    "is_connected check hung for {}s — treating peripheral as gone",
+                    PER_POLL_TIMEOUT.as_secs()
+                );
+            }
         }
     }
 }
