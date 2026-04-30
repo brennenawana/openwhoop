@@ -61,6 +61,15 @@ pub struct SleepSnapshot {
     /// The UI can show a "calibrating" hint when this is below 14
     /// (the full baseline window).
     pub baseline_window_nights: Option<i32>,
+    /// `sleep_id` (YYYY-MM-DD) — the unique key the UI uses to call the
+    /// override / clear-override commands.
+    pub sleep_id: chrono::NaiveDate,
+    /// Detector's pre-override start, populated only when the user has
+    /// edited this cycle's bounds. The UI uses presence to surface an
+    /// "Edited" badge + a "Reset to detected" button.
+    pub original_start: Option<NaiveDateTime>,
+    /// Mirror of `original_start` for the cycle's end bound.
+    pub original_end: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
@@ -161,6 +170,9 @@ fn build_snapshot(
         score_components,
         classifier_version: cycle.classifier_version.clone(),
         baseline_window_nights: None,
+        sleep_id: cycle.sleep_id,
+        original_start: cycle.original_start,
+        original_end: cycle.original_end,
     }
 }
 
@@ -581,8 +593,20 @@ pub async fn refresh_baseline_if_stale(db: &DatabaseHandler) -> anyhow::Result<b
 /// reflects whatever threshold change motivated the reclassify.
 async fn refresh_baseline(db: &DatabaseHandler, force: bool) -> anyhow::Result<bool> {
     let now = Local::now().naive_local();
-    let last = db.get_latest_user_baseline().await?.map(|m| m.computed_at);
-    if !force && !should_update(last, now) {
+    let latest = db.get_latest_user_baseline().await?;
+    let last = latest.as_ref().map(|m| m.computed_at);
+
+    // Bypass the 24h idempotence gate when the most recent baseline is
+    // missing the per-user skin-temp calibration anchor (e.g. just after
+    // the m20260429 migration added the columns). Without this, users
+    // would see "Calibrating" on the Now-page Skin tile for up to 24h
+    // after upgrading.
+    let needs_calibration = latest
+        .as_ref()
+        .map(|m| m.skin_temp_raw_median.is_none())
+        .unwrap_or(true);
+
+    if !force && !needs_calibration && !should_update(last, now) {
         return Ok(false);
     }
     let nights = db
@@ -591,7 +615,33 @@ async fn refresh_baseline(db: &DatabaseHandler, force: bool) -> anyhow::Result<b
     if nights.is_empty() {
         return Ok(false);
     }
-    let snapshot = compute_baseline(&nights);
+    let mut snapshot = compute_baseline(&nights);
+
+    // Skin-temp calibration anchor — separate from the night-aggregate
+    // pipeline because it's drawn from all stable-wear HR samples (day
+    // + night), not just sleep cycles. 90-day window matches WHOOP's
+    // documented baseline duration ("WHOOP builds a personal 90-day
+    // baseline to compare against") and gives the median enough
+    // samples to be insensitive to seasonal/environmental shifts.
+    // Failure is non-fatal: the user baseline still writes; the
+    // calibration just stays NULL until the next attempt succeeds.
+    let calibration_window = now - chrono::Duration::days(90);
+    match db
+        .compute_skin_temp_calibration_anchor(calibration_window, now)
+        .await
+    {
+        Ok(Some(anchor)) => {
+            snapshot.skin_temp_raw_median = Some(anchor.raw_median);
+            snapshot.skin_temp_calibration_sample_count = Some(anchor.sample_count);
+        }
+        Ok(None) => {
+            // Not enough wear data yet; leave calibration NULL.
+        }
+        Err(e) => {
+            log::warn!("skin temp calibration anchor failed: {e:#}");
+        }
+    }
+
     db.insert_user_baseline(&snapshot, now).await?;
     Ok(true)
 }
@@ -638,6 +688,8 @@ mod tests {
             sleep_debt_hours: Some(1.5),
             performance_score: Some(85.0),
             classifier_version: Some("rule-v1".to_string()),
+            original_start: None,
+            original_end: None,
         }
     }
 

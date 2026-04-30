@@ -22,6 +22,8 @@ mod m20260417_040000_hrv_samples;
 mod m20260417_050000_sync_log;
 mod m20260417_060000_activity_samples;
 mod m20260418_000000_dev_notes;
+mod m20260428_000000_sleep_overrides;
+mod m20260429_000000_skin_temp_calibration;
 
 pub struct Migrator;
 
@@ -51,6 +53,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260417_050000_sync_log::Migration),
             Box::new(m20260417_060000_activity_samples::Migration),
             Box::new(m20260418_000000_dev_notes::Migration),
+            Box::new(m20260428_000000_sleep_overrides::Migration),
+            Box::new(m20260429_000000_skin_temp_calibration::Migration),
         ]
     }
 }

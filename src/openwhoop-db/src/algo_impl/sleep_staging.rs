@@ -1,10 +1,11 @@
 //! Database queries that back the sleep-staging pipeline.
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, TimeDelta};
 use openwhoop_algos::sleep_staging::{
     ArchitectureMetrics, BaselineSnapshot, EpochFeatures, EpochStage, NightAggregate,
     PerformanceScore, RespiratoryStats,
 };
+use openwhoop_codec::SensorData;
 use openwhoop_entities::{heart_rate, sleep_cycles, sleep_epochs, user_baselines};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
@@ -13,6 +14,21 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::DatabaseHandler;
+
+/// Result of a per-user skin-temp calibration computation. Both fields
+/// are `None` when there isn't enough stable-wear data — caller treats
+/// the calibration as unavailable and the UI falls back to deviation-only
+/// display.
+pub struct SkinTempCalibrationAnchor {
+    pub raw_median: f64,
+    pub sample_count: i32,
+}
+
+/// Skip the first 10 min of each wear period so the thermistor has time
+/// to equilibrate from ambient → skin temp. Without this, samples taken
+/// seconds after putting the strap on (still cold from the air) would
+/// drag the median down and bias the calibration anchor.
+const WEAR_EQUILIBRATION_MIN: i64 = 10;
 
 /// One write-payload produced by the staging pipeline per cycle.
 pub struct StageCycleUpdate<'a> {
@@ -249,9 +265,84 @@ impl DatabaseHandler {
             respiratory_rate_std: Set(snapshot.respiratory_rate_std),
             skin_temp_mean_c: Set(snapshot.skin_temp_mean_c),
             skin_temp_std_c: Set(snapshot.skin_temp_std_c),
+            skin_temp_raw_median: Set(snapshot.skin_temp_raw_median),
+            skin_temp_calibration_sample_count: Set(snapshot.skin_temp_calibration_sample_count),
         };
         model.insert(&self.db).await?;
         Ok(())
+    }
+
+    /// Compute the per-user skin-temp calibration anchor: the median raw
+    /// thermistor ADC value across HR samples taken inside stable wear
+    /// periods over `[window_start, window_end]`. "Stable" means the
+    /// sample is at least `WEAR_EQUILIBRATION_MIN` minutes past the
+    /// start of its wear period (so the thermistor has equilibrated
+    /// from ambient → skin temp).
+    ///
+    /// Returns `None` when no qualifying samples exist; caller treats
+    /// the strap as un-calibrated.
+    pub async fn compute_skin_temp_calibration_anchor(
+        &self,
+        window_start: NaiveDateTime,
+        window_end: NaiveDateTime,
+    ) -> anyhow::Result<Option<SkinTempCalibrationAnchor>> {
+        let wear_periods = self
+            .get_wear_periods_overlapping(window_start, window_end)
+            .await?;
+        if wear_periods.is_empty() {
+            return Ok(None);
+        }
+
+        let equilibration = TimeDelta::minutes(WEAR_EQUILIBRATION_MIN);
+        let mut raws: Vec<u16> = Vec::new();
+
+        for wp in &wear_periods {
+            let stable_start = wp.start + equilibration;
+            // Skip wear periods shorter than the equilibration window —
+            // they're transient (picked up + put down) and the thermistor
+            // never reached skin temp.
+            if stable_start >= wp.end {
+                continue;
+            }
+            let q_start = stable_start.max(window_start);
+            let q_end = wp.end.min(window_end);
+            if q_start >= q_end {
+                continue;
+            }
+
+            let rows = heart_rate::Entity::find()
+                .filter(heart_rate::Column::Time.gte(q_start))
+                .filter(heart_rate::Column::Time.lte(q_end))
+                .filter(heart_rate::Column::SensorData.is_not_null())
+                .all(&self.db)
+                .await?;
+
+            for row in rows {
+                let Some(json) = row.sensor_data else { continue };
+                let Ok(sd) = serde_json::from_value::<SensorData>(json) else {
+                    continue;
+                };
+                // Defensive: skip impossible-low readings (off-wrist
+                // somehow inside a wear period — could happen at the
+                // boundary of a derived period).
+                if sd.skin_temp_raw < 100 {
+                    continue;
+                }
+                raws.push(sd.skin_temp_raw);
+            }
+        }
+
+        if raws.is_empty() {
+            return Ok(None);
+        }
+
+        raws.sort_unstable();
+        let median = f64::from(raws[raws.len() / 2]);
+        let sample_count = i32::try_from(raws.len()).unwrap_or(i32::MAX);
+        Ok(Some(SkinTempCalibrationAnchor {
+            raw_median: median,
+            sample_count,
+        }))
     }
 
     /// Build [`NightAggregate`]s for the most recent N cycles that have

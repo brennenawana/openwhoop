@@ -1,6 +1,7 @@
 pub(crate) mod activity;
 pub use activity::{
     ActivityPeriod, MAX_SLEEP_PAUSE, MAX_WORKOUT_DURATION, MIN_WORKOUT_DURATION,
+    SLEEP_AVG_HR_BUFFER_BPM, looks_like_real_sleep,
 };
 
 pub(crate) mod sleep;
@@ -22,14 +23,17 @@ pub(crate) mod spo2;
 pub use spo2::{SpO2Calculator, SpO2Reading, SpO2Score};
 
 pub(crate) mod temperature;
-pub use temperature::{SkinTempCalculator, SkinTempScore};
+pub use temperature::{SkinTempCalculator, SkinTempScore, SkinTempCalibration};
 
 pub mod helpers;
 
 pub mod sleep_staging;
 
 pub(crate) mod wear_tracking;
-pub use wear_tracking::{WearEvent, WearPeriod, WearSource, SkinContactRun, derive_wear_periods};
+pub use wear_tracking::{
+    SKIN_CONTACT_MERGE_GAP_SECS, SkinContactRun, WearEvent, WearPeriod, WearSource,
+    derive_wear_periods,
+};
 
 pub(crate) mod daytime_hrv;
 pub use daytime_hrv::{HrvContext, HrvSample, compute_daytime_hrv};

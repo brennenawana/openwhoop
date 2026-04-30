@@ -46,6 +46,12 @@ pub struct NightEntry {
     pub sleep_debt_hours: Option<f64>,
     pub avg_hrv: i32,
     pub classifier_version: Option<String>,
+    /// Detector's pre-override start, populated only when the user has
+    /// edited this cycle's bounds. UI uses presence to surface "Edited"
+    /// + the "Reset to detected" action inside the hypnogram modal.
+    pub original_start: Option<NaiveDateTime>,
+    /// Mirror of `original_start` for the cycle's end bound.
+    pub original_end: Option<NaiveDateTime>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +170,8 @@ async fn load_nights(
             sleep_debt_hours: cycle.sleep_debt_hours,
             avg_hrv: cycle.avg_hrv,
             classifier_version: cycle.classifier_version.clone(),
+            original_start: cycle.original_start,
+            original_end: cycle.original_end,
         });
     }
     out

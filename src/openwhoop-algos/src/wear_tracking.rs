@@ -86,10 +86,10 @@ pub fn derive_wear_periods(
     window_end: NaiveDateTime,
 ) -> Vec<WearPeriod> {
     let mut periods: Vec<WearPeriod> = Vec::new();
+    let merged_skin = merge_skin_runs(skin_runs);
 
     // Step 1: events-derived periods.
     let mut open_on: Option<NaiveDateTime> = None;
-    let last_sample_time = skin_runs.iter().map(|r| r.end).max().unwrap_or(window_end);
     for ev in events {
         if ev.timestamp < window_start || ev.timestamp > window_end {
             continue;
@@ -126,18 +126,31 @@ pub fn derive_wear_periods(
             }
         }
     }
-    // Dangling open WristOn at window end — close at the last observed
-    // heart_rate sample with skin_contact=1 (per PRD), or window_end.
+    // Dangling open WristOn — close at the end of the contiguous
+    // skin_contact span the WristOn falls into, not the global last
+    // skin_contact sample. A missed WristOff event would otherwise
+    // bridge multi-day off-wrist gaps as continuous wear (observed:
+    // single events-source period spanning 9 days when the strap was
+    // on/off many times). If no skin_contact span overlaps the WristOn,
+    // drop the period — better to under-report than fabricate days of
+    // wear from a single dangling event.
     if let Some(start) = open_on {
-        periods.push(WearPeriod {
-            start,
-            end: last_sample_time.min(window_end),
-            source: WearSource::Events,
-        });
+        const GRACE_SECS: i64 = 300;
+        let grace = chrono::TimeDelta::seconds(GRACE_SECS);
+        if let Some(close_at) = merged_skin
+            .iter()
+            .find(|r| start >= r.start - grace && start <= r.end + grace)
+            .map(|r| r.end)
+        {
+            periods.push(WearPeriod {
+                start,
+                end: close_at.min(window_end),
+                source: WearSource::Events,
+            });
+        }
     }
 
     // Step 2: merge skin_contact runs to fill events-gaps.
-    let merged_skin = merge_skin_runs(skin_runs);
     let mut skin_periods: Vec<WearPeriod> = Vec::new();
     for run in merged_skin {
         if run.end < window_start || run.start > window_end {
@@ -328,6 +341,46 @@ mod tests {
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].source, WearSource::Events);
         assert_eq!(periods[0].end, dt(90));
+    }
+
+    #[test]
+    fn dangling_wriston_does_not_bridge_off_wrist_gap() {
+        // Real-world bug: a WristOn fires but no matching WristOff is
+        // ever recorded. The strap is then taken on/off many times.
+        // The dangling open should close at the end of the first
+        // contiguous skin_contact span — not bridge the gap and
+        // swallow later off-wrist intervals.
+        let events = vec![WearEvent { timestamp: dt(0), on: true }];
+        let runs = vec![
+            SkinContactRun { start: dt(0), end: dt(60) },     // wear 1: 0-60
+            SkinContactRun { start: dt(180), end: dt(240) },  // wear 2 after 2h gap
+        ];
+        let periods = derive_wear_periods(&events, &runs, dt(-60), dt(300));
+        // Events period closes at t=60 (end of first contiguous span),
+        // not at t=240 (last sample). The second skin_contact run
+        // becomes its own period.
+        let events_period = periods
+            .iter()
+            .find(|p| p.source == WearSource::Events)
+            .expect("events period present");
+        assert_eq!(events_period.end, dt(60));
+        // Total reported wear should be ~120 min, not ~240 min.
+        let total: f64 = periods.iter().map(|p| p.duration_minutes()).sum();
+        assert!(total < 130.0, "wear time bridged the gap: {total} min");
+    }
+
+    #[test]
+    fn dangling_wriston_with_no_nearby_skin_contact_drops_period() {
+        // If a WristOn fires but there's no skin_contact data near it,
+        // we drop the period rather than fabricating one bounded by
+        // window_end. Better to under-report than to invent days of wear.
+        let events = vec![WearEvent { timestamp: dt(0), on: true }];
+        let runs = vec![SkinContactRun { start: dt(120), end: dt(180) }];
+        let periods = derive_wear_periods(&events, &runs, dt(-60), dt(300));
+        assert!(
+            !periods.iter().any(|p| p.source == WearSource::Events),
+            "should not emit events period when no skin_contact is near the WristOn"
+        );
     }
 
     #[test]

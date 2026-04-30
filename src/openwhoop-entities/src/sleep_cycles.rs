@@ -52,6 +52,15 @@ pub struct Model {
     pub performance_score: Option<f64>,
     #[sea_orm(column_type = "Text", nullable)]
     pub classifier_version: Option<String>,
+    /// Detector's pre-override `start`, populated only when the user has
+    /// edited the cycle's bounds. The canonical `start` column always
+    /// holds the *effective* bounds; this column exists solely to enable
+    /// "reset to detected." NULL = never overridden.
+    #[sea_orm(nullable)]
+    pub original_start: Option<DateTime>,
+    /// Mirror of `original_start` for the cycle's end bound.
+    #[sea_orm(nullable)]
+    pub original_end: Option<DateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

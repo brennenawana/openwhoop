@@ -2,7 +2,9 @@
 //! wear-period derivation.
 
 use chrono::NaiveDateTime;
-use openwhoop_algos::{SkinContactRun, WearEvent, WearPeriod, WearSource};
+use openwhoop_algos::{
+    SKIN_CONTACT_MERGE_GAP_SECS, SkinContactRun, WearEvent, WearPeriod, WearSource,
+};
 use openwhoop_codec::SensorData;
 use openwhoop_entities::{events, heart_rate, wear_periods};
 use sea_orm::{
@@ -36,9 +38,13 @@ impl DatabaseHandler {
             .collect())
     }
 
-    /// Derive contiguous runs of `skin_contact = 1` from
-    /// `heart_rate.sensor_data` in a time range. Allows up to
-    /// `SKIN_CONTACT_MERGE_GAP_SECS` gap inside a run.
+    /// Derive contiguous runs of skin contact from `heart_rate.sensor_data`
+    /// in a time range. A run breaks on either (a) a sample with
+    /// `skin_contact == 0`, or (b) a time gap between consecutive samples
+    /// longer than `SKIN_CONTACT_MERGE_GAP_SECS`. The gap break matters
+    /// because the strap stops sampling entirely when off-wrist on some
+    /// firmware/generations — so without it, "no zero-sample ever appears"
+    /// would extend a single run across multi-hour off-wrist gaps.
     pub async fn get_skin_contact_runs(
         &self,
         start: NaiveDateTime,
@@ -74,7 +80,16 @@ impl DatabaseHandler {
                     });
                 }
                 Some(run) => {
-                    run.end = row.time;
+                    let gap = (row.time - run.end).num_seconds();
+                    if gap > SKIN_CONTACT_MERGE_GAP_SECS {
+                        runs.push(run.clone());
+                        *run = SkinContactRun {
+                            start: row.time,
+                            end: row.time,
+                        };
+                    } else {
+                        run.end = row.time;
+                    }
                 }
             }
         }
@@ -180,6 +195,78 @@ mod tests {
             .unwrap()
             .and_hms_opt(12, 0, 0)
             .unwrap()
+    }
+
+    /// Insert a heart_rate row with a crafted sensor_data blob that
+    /// only sets `skin_contact` (other fields zeroed/default). Used by
+    /// the gap-split test below.
+    async fn insert_hr_with_skin_contact(
+        db: &DatabaseHandler,
+        time: NaiveDateTime,
+        skin_contact: u8,
+    ) {
+        use openwhoop_entities::heart_rate;
+        use sea_orm::ActiveValue::Set;
+        let sensor_json = serde_json::json!({
+            "ppg_green": 0,
+            "ppg_red_ir": 0,
+            "spo2_red": 0,
+            "spo2_ir": 0,
+            "skin_temp_raw": 0,
+            "ambient_light": 0,
+            "led_drive_1": 0,
+            "led_drive_2": 0,
+            "resp_rate_raw": 0,
+            "signal_quality": 0,
+            "skin_contact": skin_contact,
+            "accel_gravity": [0.0, 0.0, 1.0],
+            "spo2_pct": null,
+        });
+        let model = heart_rate::ActiveModel {
+            id: NotSet,
+            bpm: Set(60),
+            time: Set(time),
+            rr_intervals: Set(String::new()),
+            activity: NotSet,
+            stress: NotSet,
+            spo2: NotSet,
+            skin_temp: NotSet,
+            imu_data: NotSet,
+            sensor_data: Set(Some(sensor_json)),
+            synced: NotSet,
+        };
+        model.insert(&db.db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_skin_contact_runs_splits_on_time_gap() {
+        // Reproduces the real-world bug where the strap stops sampling
+        // entirely when off-wrist (no zero-readings, just a time gap).
+        // Without the time-gap split, two separated wear periods get
+        // collapsed into one continuous run that bridges the gap.
+        let db = DatabaseHandler::new("sqlite::memory:").await;
+        // First wear stretch: 12:00 - 12:02 (3 samples, 1s apart).
+        insert_hr_with_skin_contact(&db, dt(), 70).await;
+        insert_hr_with_skin_contact(&db, dt() + chrono::Duration::seconds(1), 198).await;
+        insert_hr_with_skin_contact(&db, dt() + chrono::Duration::seconds(2), 197).await;
+        // Off-wrist: no samples for 5 hours (strap stopped sampling).
+        // Second wear stretch: 17:00 - 17:02.
+        insert_hr_with_skin_contact(&db, dt() + chrono::Duration::hours(5), 70).await;
+        insert_hr_with_skin_contact(
+            &db,
+            dt() + chrono::Duration::hours(5) + chrono::Duration::seconds(1),
+            198,
+        )
+        .await;
+
+        let runs = db
+            .get_skin_contact_runs(dt() - chrono::Duration::hours(1), dt() + chrono::Duration::hours(7))
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 2, "expected 2 runs split by gap, got: {runs:?}");
+        assert_eq!(runs[0].start, dt());
+        assert_eq!(runs[0].end, dt() + chrono::Duration::seconds(2));
+        assert_eq!(runs[1].start, dt() + chrono::Duration::hours(5));
     }
 
     #[tokio::test]

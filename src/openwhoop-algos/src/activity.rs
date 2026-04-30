@@ -38,6 +38,49 @@ struct TempActivity {
     end: NaiveDateTime,
 }
 
+/// How many bpm above a user's baseline RHR a candidate sleep period's
+/// average HR is allowed to be before we reject it as not-actually-sleep.
+/// Real sleep averages are typically 5-15 bpm above the user's RHR
+/// (sleep-onset latency, REM excursions, brief awakenings); 20 bpm leaves
+/// margin for restless nights without admitting sedentary-but-awake
+/// periods (TV/reading) which run 20-30 bpm above RHR.
+pub const SLEEP_AVG_HR_BUFFER_BPM: u32 = 20;
+
+/// Validates a gravity-derived sleep candidate against the user's
+/// personal HR baseline. The gravity classifier alone marks any
+/// sustained stillness as Sleep, which mis-fires on sedentary wake
+/// (couch/TV/reading). A real sleep period's average HR sits close to
+/// the user's resting HR; a sedentary-awake period's average sits
+/// markedly higher.
+///
+/// Returns `true` (keep) when:
+/// - No baseline is supplied (fresh user, can't validate — trust the detector)
+/// - No HR data exists in the period (insufficient signal)
+/// - Average HR is within `SLEEP_AVG_HR_BUFFER_BPM` of `baseline_min_bpm`
+///
+/// Returns `false` (reject) when the period's avg HR is too high to be
+/// real sleep.
+pub fn looks_like_real_sleep(
+    period: &ActivityPeriod,
+    history: &[ParsedHistoryReading],
+    baseline_min_bpm: Option<u8>,
+) -> bool {
+    let Some(baseline) = baseline_min_bpm else {
+        return true;
+    };
+    let bpms: Vec<u32> = history
+        .iter()
+        .filter(|h| h.time >= period.start && h.time <= period.end && h.bpm > 0)
+        .map(|h| u32::from(h.bpm))
+        .collect();
+    if bpms.is_empty() {
+        return true;
+    }
+    let avg = bpms.iter().sum::<u32>() / bpms.len() as u32;
+    let threshold = u32::from(baseline) + SLEEP_AVG_HR_BUFFER_BPM;
+    avg <= threshold
+}
+
 impl ActivityPeriod {
     pub fn is_active(&self) -> bool {
         matches!(self.activity, Activity::Active)
@@ -328,6 +371,91 @@ mod tests {
     #[test]
     fn find_sleep_empty_returns_none() {
         assert!(ActivityPeriod::find_sleep(&mut vec![]).is_none());
+    }
+
+    // -- looks_like_real_sleep ---------------------------------------------
+
+    fn make_hr_reading(minutes: i64, bpm: u8) -> ParsedHistoryReading {
+        ParsedHistoryReading {
+            time: base() + Duration::minutes(minutes),
+            bpm,
+            rr: vec![],
+            imu_data: None,
+            gravity: None,
+        }
+    }
+
+    #[test]
+    fn looks_like_real_sleep_keeps_true_sleep() {
+        // Period with avg HR ~62 against baseline 50 — real sleep.
+        let b = base();
+        let period = ActivityPeriod {
+            activity: Activity::Sleep,
+            start: b,
+            end: b + Duration::hours(8),
+            duration: Duration::hours(8),
+        };
+        let history: Vec<_> = (0..480).map(|m| make_hr_reading(m, 62)).collect();
+        assert!(looks_like_real_sleep(&period, &history, Some(50)));
+    }
+
+    #[test]
+    fn looks_like_real_sleep_rejects_sedentary_wake() {
+        // Reproduces the real-world bug: HR averages 77 against
+        // baseline 49 (couch/TV stillness misclassified as sleep).
+        let b = base();
+        let period = ActivityPeriod {
+            activity: Activity::Sleep,
+            start: b,
+            end: b + Duration::hours(4),
+            duration: Duration::hours(4),
+        };
+        let history: Vec<_> = (0..240).map(|m| make_hr_reading(m, 77)).collect();
+        assert!(!looks_like_real_sleep(&period, &history, Some(49)));
+    }
+
+    #[test]
+    fn looks_like_real_sleep_keeps_when_no_baseline() {
+        // Fresh user with no prior sleep history: don't filter,
+        // trust the gravity classifier.
+        let b = base();
+        let period = ActivityPeriod {
+            activity: Activity::Sleep,
+            start: b,
+            end: b + Duration::hours(4),
+            duration: Duration::hours(4),
+        };
+        let history: Vec<_> = (0..240).map(|m| make_hr_reading(m, 95)).collect();
+        assert!(looks_like_real_sleep(&period, &history, None));
+    }
+
+    #[test]
+    fn looks_like_real_sleep_keeps_when_no_hr_data() {
+        // Period with no overlapping HR samples — can't validate,
+        // trust the gravity classifier.
+        let b = base();
+        let period = ActivityPeriod {
+            activity: Activity::Sleep,
+            start: b,
+            end: b + Duration::hours(4),
+            duration: Duration::hours(4),
+        };
+        assert!(looks_like_real_sleep(&period, &[], Some(50)));
+    }
+
+    #[test]
+    fn looks_like_real_sleep_handles_borderline() {
+        // avg exactly equals baseline + buffer — treat as keep
+        // (boundary inclusive). Baseline 50, buffer 20 → threshold 70.
+        let b = base();
+        let period = ActivityPeriod {
+            activity: Activity::Sleep,
+            start: b,
+            end: b + Duration::hours(4),
+            duration: Duration::hours(4),
+        };
+        let history: Vec<_> = (0..240).map(|m| make_hr_reading(m, 70)).collect();
+        assert!(looks_like_real_sleep(&period, &history, Some(50)));
     }
 
     // -- is_active ----------------------------------------------------------

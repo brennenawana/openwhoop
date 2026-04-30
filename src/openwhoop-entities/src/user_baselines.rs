@@ -31,6 +31,17 @@ pub struct Model {
     pub skin_temp_mean_c: Option<f64>,
     #[sea_orm(column_type = "Double", nullable)]
     pub skin_temp_std_c: Option<f64>,
+    /// Median raw thermistor ADC value across stable wear samples in
+    /// the baseline window. Anchored to a population-typical 32°C
+    /// resting wrist skin temp by [`SkinTempCalibration`]. NULL when
+    /// the user has insufficient wear data — UI falls back to
+    /// deviation-only display.
+    #[sea_orm(column_type = "Double", nullable)]
+    pub skin_temp_raw_median: Option<f64>,
+    /// Number of `skin_temp_raw` samples that contributed to
+    /// `skin_temp_raw_median`. Lets the UI gate "show calibrated absolute"
+    /// vs "show deviation only / Calibrating".
+    pub skin_temp_calibration_sample_count: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

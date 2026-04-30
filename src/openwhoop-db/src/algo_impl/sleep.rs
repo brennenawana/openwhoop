@@ -1,7 +1,9 @@
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use openwhoop_algos::SleepCycle;
 use openwhoop_entities::sleep_cycles;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 
 use crate::DatabaseHandler;
 
@@ -20,6 +22,73 @@ impl DatabaseHandler {
             .into_iter()
             .map(map_sleep_cycle)
             .collect())
+    }
+
+    /// Find a sleep cycle row by its sleep_id (the unique YYYY-MM-DD key).
+    /// Returns the raw entity model so callers can access override columns
+    /// and other fields that the algos-level `SleepCycle` strips.
+    pub async fn find_sleep_cycle_by_sleep_id(
+        &self,
+        sleep_id: NaiveDate,
+    ) -> anyhow::Result<Option<sleep_cycles::Model>> {
+        Ok(sleep_cycles::Entity::find()
+            .filter(sleep_cycles::Column::SleepId.eq(sleep_id))
+            .one(&self.db)
+            .await?)
+    }
+
+    /// Apply user-supplied bounds to a sleep cycle. Rewrites the canonical
+    /// `start`/`end` to the user's values (so all downstream consumers
+    /// keep reading `start`/`end` without indirection), saves the
+    /// detector's *previous* bounds into `original_start`/`original_end`
+    /// so a "reset to detected" can later restore them, and updates
+    /// HR-derived metrics. Staging is invalidated unconditionally —
+    /// bounds changed, the prior epochs no longer cover the night, and
+    /// `stage_sleep` will repopulate them on the next pipeline run.
+    ///
+    /// `original_start`/`original_end` are passed by the caller because
+    /// only the caller knows whether this is the *first* override (in
+    /// which case the existing `row.start`/`row.end` are the detector
+    /// values worth preserving) or a *subsequent* edit (in which case the
+    /// already-stored `row.original_*` values are the canonical detector
+    /// bounds and must be passed through unchanged).
+    pub async fn apply_sleep_bounds_override(
+        &self,
+        sleep_id: NaiveDate,
+        recomputed: SleepCycle,
+        original_start: Option<NaiveDateTime>,
+        original_end: Option<NaiveDateTime>,
+    ) -> anyhow::Result<()> {
+        let row = self
+            .find_sleep_cycle_by_sleep_id(sleep_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("sleep_cycle not found for sleep_id {sleep_id}"))?;
+        let cycle_id = row.id;
+
+        let upd = sleep_cycles::ActiveModel {
+            id: Set(cycle_id),
+            start: Set(recomputed.start),
+            end: Set(recomputed.end),
+            min_bpm: Set(recomputed.min_bpm.into()),
+            max_bpm: Set(recomputed.max_bpm.into()),
+            avg_bpm: Set(recomputed.avg_bpm.into()),
+            min_hrv: Set(recomputed.min_hrv.into()),
+            max_hrv: Set(recomputed.max_hrv.into()),
+            avg_hrv: Set(recomputed.avg_hrv.into()),
+            score: Set(Some(recomputed.score)),
+            original_start: Set(original_start),
+            original_end: Set(original_end),
+            ..Default::default()
+        };
+        upd.update(&self.db).await?;
+
+        // Bounds changed by definition (override doesn't fire otherwise),
+        // so blow away staging output. The next stage_sleep run picks the
+        // cycle back up via its `classifier_version IS NULL` filter.
+        self.delete_sleep_epochs_for_cycle(cycle_id).await?;
+        self.reset_cycle_staging_fields(cycle_id).await?;
+
+        Ok(())
     }
 }
 
@@ -83,6 +152,8 @@ mod tests {
             sleep_debt_hours: None,
             performance_score: None,
             classifier_version: None,
+            original_start: None,
+            original_end: None,
         };
 
         let cycle = map_sleep_cycle(model);
@@ -129,6 +200,8 @@ mod tests {
             sleep_debt_hours: None,
             performance_score: None,
             classifier_version: None,
+            original_start: None,
+            original_end: None,
         };
 
         let cycle = map_sleep_cycle(model);

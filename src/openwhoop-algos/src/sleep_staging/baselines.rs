@@ -53,6 +53,12 @@ pub struct BaselineSnapshot {
     pub respiratory_rate_std: Option<f64>,
     pub skin_temp_mean_c: Option<f64>,
     pub skin_temp_std_c: Option<f64>,
+    /// Median raw thermistor ADC across stable wear samples — anchor
+    /// for per-user `SkinTempCalibration`. Populated by the orchestrator
+    /// (a separate DB query against heart_rate × wear_periods) rather
+    /// than by `compute_baseline`, since this signal isn't sleep-derived.
+    pub skin_temp_raw_median: Option<f64>,
+    pub skin_temp_calibration_sample_count: Option<i32>,
 }
 
 pub fn compute_baseline(nights: &[NightAggregate]) -> BaselineSnapshot {
@@ -88,6 +94,8 @@ pub fn compute_baseline(nights: &[NightAggregate]) -> BaselineSnapshot {
         respiratory_rate_std: std_opt(&resp_values),
         skin_temp_mean_c: mean_opt(&temp_values),
         skin_temp_std_c: std_opt(&temp_values),
+        skin_temp_raw_median: None,
+        skin_temp_calibration_sample_count: None,
     }
 }
 

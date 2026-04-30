@@ -14,7 +14,7 @@ use openwhoop_entities::packets;
 use crate::{
     algo::{
         ActivityPeriod, MAX_SLEEP_PAUSE, SkinTempCalculator, SleepCycle, SpO2Calculator,
-        StressCalculator, helpers::format_hm::FormatHM,
+        StressCalculator, helpers::format_hm::FormatHM, looks_like_real_sleep,
     },
     types::activities,
 };
@@ -351,8 +351,34 @@ impl OpenWhoop {
         Ok(())
     }
 
+    /// Compute a personal RHR baseline from the most recent up-to-7
+    /// real sleep cycles' min_bpm. Returns None if fewer than 3 cycles
+    /// exist (insufficient data — caller should skip the HR validation
+    /// and trust the gravity classifier).
+    async fn compute_sleep_baseline_min_bpm(&self) -> anyhow::Result<Option<u8>> {
+        let cycles = self.database.get_sleep_cycles(None).await?;
+        let mut recent: Vec<u8> = cycles
+            .iter()
+            .rev()
+            .take(7)
+            .map(|c| c.min_bpm)
+            .collect();
+        if recent.len() < 3 {
+            return Ok(None);
+        }
+        recent.sort_unstable();
+        Ok(Some(recent[recent.len() / 2]))
+    }
+
     /// TODO: add handling for data splits
     pub async fn detect_sleeps(&self) -> anyhow::Result<()> {
+        // Personal HR baseline for rejecting sedentary-but-awake periods
+        // that look like sleep on the gravity classifier alone. Median
+        // min_bpm across recent real sleep cycles approximates the user's
+        // resting HR; candidates whose avg HR sits too far above it are
+        // not actually sleep (couch/TV/reading).
+        let baseline_min_bpm = self.compute_sleep_baseline_min_bpm().await?;
+
         'a: loop {
             let last_sleep = self.get_latest_sleep().await?;
 
@@ -366,6 +392,19 @@ impl OpenWhoop {
             let mut periods = ActivityPeriod::detect_from_gravity(&history);
 
             while let Some(mut sleep) = ActivityPeriod::find_sleep(&mut periods) {
+                // HR sanity check — reject candidates that look like
+                // sedentary wake. Applied before the merge logic so that
+                // bogus candidates don't accidentally get stitched onto
+                // a prior real sleep cycle.
+                if !looks_like_real_sleep(&sleep, &history, baseline_min_bpm) {
+                    info!(
+                        "Skipping sleep candidate {} → {} ({}): HR avg too high vs baseline",
+                        sleep.start,
+                        sleep.end,
+                        sleep.duration.format_hm()
+                    );
+                    continue;
+                }
                 if let Some(last_sleep) = last_sleep {
                     let diff = sleep.start - last_sleep.end;
 
@@ -423,6 +462,143 @@ impl OpenWhoop {
             break;
         }
 
+        Ok(())
+    }
+
+    /// Apply user-supplied bounds to an existing sleep cycle. Validates
+    /// that the new bounds don't overlap adjacent cycles and aren't in
+    /// the future, recomputes HR-derived fields against the new window,
+    /// preserves the detector's previous bounds in `original_*` columns
+    /// so a future "reset to detected" can restore them, and invalidates
+    /// staging so the pipeline re-stages on the next sync.
+    ///
+    /// Caller passes `sleep_id` (YYYY-MM-DD), and effective `new_start` /
+    /// `new_end`. The method handles preserving the detector's original
+    /// bounds itself — caller doesn't need to know whether this is the
+    /// first override or a subsequent edit.
+    pub async fn apply_sleep_override(
+        &self,
+        sleep_id: chrono::NaiveDate,
+        new_start: NaiveDateTime,
+        new_end: NaiveDateTime,
+    ) -> anyhow::Result<()> {
+        if new_end <= new_start {
+            anyhow::bail!("end must be after start");
+        }
+        let now = Local::now().naive_local();
+        if new_end > now {
+            anyhow::bail!("end can't be in the future");
+        }
+
+        let row = self
+            .database
+            .find_sleep_cycle_by_sleep_id(sleep_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no sleep cycle for {sleep_id}"))?;
+
+        // Adjacency check: don't let bounds overlap neighboring cycles.
+        // Load all cycles, find the rows immediately before and after
+        // this one (by start). The user's edit must stay within those
+        // gaps.
+        let all = self.database.get_sleep_cycles(None).await?;
+        for c in &all {
+            if c.id == sleep_id {
+                continue;
+            }
+            // c is a neighbor (by sleep_id != ours). Constrain new bounds
+            // to not overlap any other cycle's window.
+            let overlaps =
+                new_start < c.end && new_end > c.start;
+            if overlaps {
+                anyhow::bail!(
+                    "new bounds overlap sleep cycle {} ({} → {})",
+                    c.id,
+                    c.start,
+                    c.end
+                );
+            }
+        }
+
+        // Recompute HR-derived metrics against the new window.
+        let history = self
+            .database
+            .search_history(SearchHistory {
+                from: Some(new_start),
+                to: Some(new_end),
+                ..Default::default()
+            })
+            .await?;
+        let pseudo_period = ActivityPeriod {
+            activity: openwhoop_codec::Activity::Sleep,
+            start: new_start,
+            end: new_end,
+            duration: new_end - new_start,
+        };
+        let recomputed = SleepCycle::from_event(pseudo_period, &history)?;
+
+        // Preserve detector bounds: on first edit, the existing row.start
+        // / row.end ARE the detector values; on a subsequent edit, those
+        // were already overwritten by the prior edit, so the canonical
+        // detector bounds live in row.original_*.
+        let original_start = row.original_start.or(Some(row.start));
+        let original_end = row.original_end.or(Some(row.end));
+
+        self.database
+            .apply_sleep_bounds_override(sleep_id, recomputed, original_start, original_end)
+            .await?;
+
+        info!(
+            "sleep override applied for {}: {} → {} (was {} → {})",
+            sleep_id, new_start, new_end, row.start, row.end
+        );
+        Ok(())
+    }
+
+    /// Restore a previously-overridden cycle to the detector's original
+    /// bounds. No-op if the cycle was never overridden. Recomputes
+    /// HR-derived fields and invalidates staging just like
+    /// [`apply_sleep_override`].
+    pub async fn clear_sleep_override(
+        &self,
+        sleep_id: chrono::NaiveDate,
+    ) -> anyhow::Result<()> {
+        let row = self
+            .database
+            .find_sleep_cycle_by_sleep_id(sleep_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no sleep cycle for {sleep_id}"))?;
+
+        let (Some(orig_start), Some(orig_end)) = (row.original_start, row.original_end) else {
+            // Never overridden — nothing to do.
+            return Ok(());
+        };
+
+        let history = self
+            .database
+            .search_history(SearchHistory {
+                from: Some(orig_start),
+                to: Some(orig_end),
+                ..Default::default()
+            })
+            .await?;
+        let pseudo_period = ActivityPeriod {
+            activity: openwhoop_codec::Activity::Sleep,
+            start: orig_start,
+            end: orig_end,
+            duration: orig_end - orig_start,
+        };
+        let recomputed = SleepCycle::from_event(pseudo_period, &history)?;
+
+        // Clear the original_* columns by passing None — the detector's
+        // bounds are now back in start/end where they belong.
+        self.database
+            .apply_sleep_bounds_override(sleep_id, recomputed, None, None)
+            .await?;
+
+        info!(
+            "sleep override cleared for {}: restored to {} → {}",
+            sleep_id, orig_start, orig_end
+        );
         Ok(())
     }
 
